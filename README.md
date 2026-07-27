@@ -100,7 +100,7 @@ W&B 新增指标：
 | [`base_strategy.py`](packages/ltx-trainer/src/ltx_trainer/training_strategies/base_strategy.py) | 在 `ModelInputs` 增加 `video_clean_latents` 和 `video_target_start_index`。 |
 | [`sra.py`](packages/ltx-trainer/src/ltx_trainer/sra.py) | 新增 Clean RGB SRA projector。 |
 | [`trainer.py`](packages/ltx-trainer/src/ltx_trainer/trainer.py) | 创建/加载 SRA head；捕获中间层；叠加 SRA loss；支持独立 LR、checkpoint 和 W&B metrics。 |
-| [`validation_runner.py`](packages/ltx-trainer/src/ltx_trainer/validation_runner.py) | 将官方 append 后的 reference 重排到 target 前面，使 validation 与 training 同为 `[Part16 | Depth | target]`。 |
+| [`validation_runner.py`](packages/ltx-trainer/src/ltx_trainer/validation_runner.py) | 将官方 append 后的 reference 重排到 target 前面，使 validation 与 training 同为 `Part16 → Depth → target`。 |
 | [`v2v_two_control_ic_lora.yaml`](packages/ltx-trainer/configs/v2v_two_control_ic_lora.yaml) | 新增两个有序 reference 的完整示例和 Clean RGB SRA 参数。 |
 | [`tests/`](packages/ltx-trainer/tests/) | 增加双控制预处理、reference 顺序、配置、SRA detach/warmup/mask 和 validation 布局测试。 |
 
