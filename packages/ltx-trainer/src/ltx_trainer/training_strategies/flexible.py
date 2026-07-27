@@ -121,6 +121,13 @@ ConditionConfig = Annotated[
 ]
 
 
+def _reference_conditions_in_prepend_order(
+    conditions: list[ConditionConfig],
+) -> list[ReferenceConditionConfig]:
+    """Return references in reverse application order so prepending preserves declaration order."""
+    return [condition for condition in reversed(conditions) if isinstance(condition, ReferenceConditionConfig)]
+
+
 class ModalityConfig(BaseModel):
     """Configuration for a single modality (video or audio)."""
 
@@ -415,18 +422,19 @@ class FlexibleStrategy(TrainingStrategy):
                     batch=batch,
                 )
 
-        for cond in modality_config.conditions:
-            if isinstance(cond, ReferenceConditionConfig):
-                noisy_latents, positions, timesteps, loss_mask, targets = self._apply_reference_condition(
-                    noisy_latents=noisy_latents,
-                    positions=positions,
-                    timesteps=timesteps,
-                    loss_mask=loss_mask,
-                    targets=targets,
-                    batch=batch,
-                    config=cond,
-                    modality_key=modality_key,
-                )
+        # Each reference is prepended to the current sequence. Apply them in
+        # reverse declaration order so the final token order matches the config.
+        for cond in _reference_conditions_in_prepend_order(modality_config.conditions):
+            noisy_latents, positions, timesteps, loss_mask, targets = self._apply_reference_condition(
+                noisy_latents=noisy_latents,
+                positions=positions,
+                timesteps=timesteps,
+                loss_mask=loss_mask,
+                targets=targets,
+                batch=batch,
+                config=cond,
+                modality_key=modality_key,
+            )
 
         # Step 6: Build Modality
         modality = Modality(
