@@ -135,6 +135,15 @@ training_strategy:
         latents_dir: "reference_latents_1"
         probability: 1.0
 
+  # Intermediate target hidden -> detached clean RGB VAE latent (x0).
+  clean_rgb_sra_checkpoint: null
+  clean_rgb_sra_loss_weight: 0.05
+  clean_rgb_sra_learning_rate: null
+  clean_rgb_sra_hidden_layer: 8
+  clean_rgb_sra_hidden_dim: 1024
+  clean_rgb_sra_warmup_steps: 100
+  clean_rgb_sra_beta: 0.05
+
 # -----------------------------------------------------------------------------
 # Optimization Configuration
 # -----------------------------------------------------------------------------

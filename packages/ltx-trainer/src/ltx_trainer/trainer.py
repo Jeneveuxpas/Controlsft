@@ -5,7 +5,7 @@ import re
 import time
 import warnings
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -42,6 +42,7 @@ from ltx_trainer.model_loader import load_embeddings_processor, load_transformer
 from ltx_trainer.progress import TrainingProgress
 from ltx_trainer.quantization import quantize_model
 from ltx_trainer.sigma_tracker import SigmaBucketTracker
+from ltx_trainer.sra import CleanRGBSRAHead
 from ltx_trainer.timestep_samplers import SAMPLERS
 from ltx_trainer.training_state import ConfigFingerprint, RngStates, TrainingState
 from ltx_trainer.training_strategies import get_training_strategy
@@ -84,6 +85,7 @@ class TrainingStepOutput:
 
     loss: Tensor  # [B,] per-element loss (unreduced)
     sigma: Tensor  # [B,] sampled sigma, detached from computational graph
+    metrics: dict[str, Tensor] = field(default_factory=dict)
 
 
 class LtxvTrainer:
@@ -105,6 +107,8 @@ class LtxvTrainer:
         self._load_models()
         self._setup_accelerator()
         self._collect_trainable_params()
+        self._setup_clean_rgb_sra_head()
+        self._load_clean_rgb_sra_checkpoint()
         self._loaded_checkpoint_path: Path | None = None
         self._load_checkpoint()
         self._prepare_models_for_training()
@@ -278,6 +282,9 @@ class LtxvTrainer:
                             "train/global_step": self._global_step,
                         }
                         metrics.update(self._sigma_tracker.get_metrics())
+                        metrics.update(
+                            {name: value.detach().float().mean().item() for name, value in output.metrics.items()}
+                        )
                         self._log_metrics(metrics)
 
                     # Fallback logging when progress bars are disabled
@@ -374,15 +381,47 @@ class LtxvTrainer:
         # Use strategy to prepare training inputs (returns ModelInputs with Modality objects)
         model_inputs = self._training_strategy.prepare_training_inputs(batch, self._timestep_sampler)
 
-        # Run transformer forward pass with Modality-based interface
-        video_pred, audio_pred = self._transformer(
-            video=model_inputs.video,
-            audio=model_inputs.audio,
-            perturbations=None,
-        )
+        # Capture one intermediate video block only when Clean RGB SRA is enabled.
+        captured_hidden: dict[str, Tensor] = {}
+        hook_handle = None
+        if self._clean_rgb_sra_enabled():
+            block = self._clean_rgb_sra_block()
 
-        # Use strategy to compute loss (returns per-element [B,] for sigma-bucket tracking)
+            def _capture_hidden(_module, _inputs, output) -> None:
+                video_args = output[0]
+                if video_args is None:
+                    raise ValueError("Clean RGB SRA requested but the selected block returned no video state")
+                captured_hidden["video"] = video_args.x
+
+            hook_handle = block.register_forward_hook(_capture_hidden)
+        try:
+            video_pred, audio_pred = self._transformer(
+                video=model_inputs.video,
+                audio=model_inputs.audio,
+                perturbations=None,
+            )
+        finally:
+            if hook_handle is not None:
+                hook_handle.remove()
+
+        # Official flow-matching loss remains unchanged.
         loss = self._training_strategy.compute_loss(video_pred, audio_pred, model_inputs)
+        aux_metrics: dict[str, Tensor] = {}
+        if self._clean_rgb_sra_enabled():
+            if "video" not in captured_hidden:
+                raise ValueError("Clean RGB SRA did not capture the requested intermediate hidden state")
+            if model_inputs.video_target_start_index is None:
+                raise ValueError("Clean RGB SRA requires the target token start index")
+            target_hidden = captured_hidden["video"][:, model_inputs.video_target_start_index :, :]
+            head = self._find_model_attr(self._transformer, "clean_rgb_sra_head")
+            if head is None:
+                raise ValueError("Clean RGB SRA head is not attached")
+            head_param = next(head.parameters())
+            clean_rgb_pred = head(target_hidden.to(device=head_param.device, dtype=head_param.dtype))
+            clean_rgb_sra_loss, aux_metrics = self._training_strategy.compute_clean_rgb_sra_loss(
+                clean_rgb_pred, model_inputs, self._global_step
+            )
+            loss = loss + clean_rgb_sra_loss
 
         # Sigma comes from whichever modality is generated (video preferred, else audio).
         if model_inputs.video is not None and model_inputs.video.enabled:
@@ -390,7 +429,7 @@ class LtxvTrainer:
         else:
             sigma = model_inputs.audio.sigma.detach()
 
-        return TrainingStepOutput(loss=loss, sigma=sigma)
+        return TrainingStepOutput(loss=loss, sigma=sigma, metrics=aux_metrics)
 
     def _load_models(self) -> None:
         """Load the transformer and embeddings processor for training."""
@@ -442,6 +481,76 @@ class LtxvTrainer:
 
         self._trainable_params = [p for p in self._transformer.parameters() if p.requires_grad]
         logger.debug(f"Trainable params count: {sum(p.numel() for p in self._trainable_params):,}")
+
+    def _clean_rgb_sra_enabled(self) -> bool:
+        return bool(getattr(self._config.training_strategy, "clean_rgb_sra_loss_weight", 0.0) > 0.0)
+
+    @staticmethod
+    def _iter_model_candidates(model: torch.nn.Module):
+        queue = [model]
+        seen: set[int] = set()
+        while queue:
+            candidate = queue.pop(0)
+            if id(candidate) in seen:
+                continue
+            seen.add(id(candidate))
+            yield candidate
+            if hasattr(candidate, "get_base_model"):
+                child = candidate.get_base_model()
+                if isinstance(child, torch.nn.Module):
+                    queue.append(child)
+            for attr in ("base_model", "model", "module"):
+                child = getattr(candidate, attr, None)
+                if isinstance(child, torch.nn.Module):
+                    queue.append(child)
+
+    @classmethod
+    def _find_model_attr(cls, model: torch.nn.Module, attr: str):
+        for candidate in cls._iter_model_candidates(model):
+            if hasattr(candidate, attr):
+                return getattr(candidate, attr)
+        return None
+
+    def _clean_rgb_sra_block(self) -> torch.nn.Module:
+        blocks = self._find_model_attr(self._transformer, "transformer_blocks")
+        layer = int(self._config.training_strategy.clean_rgb_sra_hidden_layer)
+        if blocks is None or not 0 <= layer < len(blocks):
+            count = 0 if blocks is None else len(blocks)
+            raise ValueError(f"clean_rgb_sra_hidden_layer {layer} is outside 0..{count - 1}")
+        return blocks[layer]
+
+    def _setup_clean_rgb_sra_head(self) -> None:
+        if not self._clean_rgb_sra_enabled():
+            return
+        base = self._transformer.get_base_model() if hasattr(self._transformer, "get_base_model") else self._transformer
+        blocks = getattr(base, "transformer_blocks", None)
+        layer = int(self._config.training_strategy.clean_rgb_sra_hidden_layer)
+        if blocks is None or not 0 <= layer < len(blocks):
+            count = 0 if blocks is None else len(blocks)
+            raise ValueError(f"clean_rgb_sra_hidden_layer {layer} is outside 0..{count - 1}")
+        input_dim = int(base.inner_dim)
+        output_dim = int(base.proj_out.out_features)
+        hidden_dim = self._config.training_strategy.clean_rgb_sra_hidden_dim or max(512, input_dim // 4)
+        head = CleanRGBSRAHead(input_dim=input_dim, hidden_dim=int(hidden_dim), output_dim=output_dim)
+        head = head.to(dtype=next(base.parameters()).dtype)
+        base.clean_rgb_sra_head = head
+        head.requires_grad_(True)
+        self._trainable_params.extend(head.parameters())
+        logger.info(
+            f"Enabled Clean RGB SRA: layer={layer}, hidden_dim={hidden_dim}, "
+            f"weight={self._config.training_strategy.clean_rgb_sra_loss_weight}"
+        )
+
+    def _load_clean_rgb_sra_checkpoint(self) -> None:
+        checkpoint = getattr(self._config.training_strategy, "clean_rgb_sra_checkpoint", None)
+        if not self._clean_rgb_sra_enabled() or checkpoint is None:
+            return
+        path = Path(checkpoint)
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+        state = payload.get("clean_rgb_sra_head", payload)
+        head = self._find_model_attr(self._transformer, "clean_rgb_sra_head")
+        head.load_state_dict(state, strict=True)
+        logger.info(f"Loaded Clean RGB SRA head from {path}")
 
     def _init_timestep_sampler(self) -> None:
         """Initialize the timestep sampler based on the config."""
@@ -687,13 +796,21 @@ class LtxvTrainer:
         opt_cfg = self._config.optimization
 
         lr = opt_cfg.learning_rate
+        optimizer_params = self._trainable_params
+        if self._clean_rgb_sra_enabled() and self._config.training_strategy.clean_rgb_sra_learning_rate is not None:
+            head = self._find_model_attr(self._transformer, "clean_rgb_sra_head")
+            head_ids = {id(param) for param in head.parameters()}
+            optimizer_params = [
+                {"params": [param for param in self._trainable_params if id(param) not in head_ids], "lr": lr},
+                {"params": list(head.parameters()), "lr": self._config.training_strategy.clean_rgb_sra_learning_rate},
+            ]
         if opt_cfg.optimizer_type == "adamw":
-            optimizer = AdamW(self._trainable_params, lr=lr)
+            optimizer = AdamW(optimizer_params, lr=lr)
         elif opt_cfg.optimizer_type == "adamw8bit":
             # noinspection PyUnresolvedReferences
             from bitsandbytes.optim import AdamW8bit  # noqa: PLC0415
 
-            optimizer = AdamW8bit(self._trainable_params, lr=lr)
+            optimizer = AdamW8bit(optimizer_params, lr=lr)
         else:
             raise ValueError(f"Unknown optimizer type: {opt_cfg.optimizer_type}")
 
@@ -971,9 +1088,29 @@ class LtxvTrainer:
         self._checkpoint_paths.append(saved_weights_path)
         self._cleanup_checkpoints()
 
+        self._save_clean_rgb_sra_head(save_dir)
         self._save_training_state(save_dir)
 
         return saved_weights_path
+
+    def _save_clean_rgb_sra_head(self, save_dir: Path) -> None:
+        if not self._clean_rgb_sra_enabled():
+            return
+        unwrapped = self._accelerator.unwrap_model(self._transformer, keep_torch_compile=False)
+        head = self._find_model_attr(unwrapped, "clean_rgb_sra_head")
+        if head is None:
+            raise ValueError("Clean RGB SRA head is not attached during checkpoint save")
+        payload = {
+            "clean_rgb_sra_head": {key: value.detach().cpu() for key, value in head.state_dict().items()},
+            "metadata": {
+                "global_step": int(self._global_step),
+                "clean_rgb_sra_hidden_layer": int(self._config.training_strategy.clean_rgb_sra_hidden_layer),
+                "clean_rgb_sra_hidden_dim": self._config.training_strategy.clean_rgb_sra_hidden_dim,
+            },
+        }
+        path = save_dir / f"clean_rgb_sra_head_step_{self._global_step:05d}.pt"
+        torch.save(payload, path)
+        logger.info(f"💾 Clean RGB SRA head saved in {path.relative_to(self._config.output_dir)}")
 
     def _cleanup_checkpoints(self) -> None:
         """Clean up old checkpoints."""

@@ -64,6 +64,10 @@ class ModelInputs:
     video_loss_mask: Tensor | None
     audio_loss_mask: Tensor | None
 
+    # Optional clean target supervision for intermediate-layer auxiliary heads.
+    video_clean_latents: Tensor | None = None
+    video_target_start_index: int | None = None
+
 
 class TrainingStrategy(ABC):
     """Abstract base class for training strategies.

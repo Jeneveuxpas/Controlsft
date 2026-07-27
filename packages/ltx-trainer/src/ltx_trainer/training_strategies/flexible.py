@@ -169,6 +169,14 @@ class FlexibleStrategyConfig(TrainingStrategyConfigBase):
         description="Audio modality configuration",
     )
 
+    clean_rgb_sra_checkpoint: str | None = Field(default=None)
+    clean_rgb_sra_loss_weight: float = Field(default=0.0, ge=0.0)
+    clean_rgb_sra_learning_rate: float | None = Field(default=None, gt=0.0)
+    clean_rgb_sra_hidden_layer: int = Field(default=8, ge=0)
+    clean_rgb_sra_hidden_dim: int | None = Field(default=None, gt=0)
+    clean_rgb_sra_warmup_steps: int = Field(default=100, ge=0)
+    clean_rgb_sra_beta: float = Field(default=0.05, gt=0.0)
+
     @model_validator(mode="after")
     def validate_at_least_one_generated(self) -> "FlexibleStrategyConfig":
         """Ensure at least one modality has is_generated=true."""
@@ -227,6 +235,8 @@ class ModalityProcessingResult:
     modality: Modality
     targets: Tensor | None
     loss_mask: Tensor | None
+    clean_latents: Tensor | None = None
+    target_start_index: int | None = None
 
 
 @dataclass
@@ -280,6 +290,8 @@ class FlexibleStrategy(TrainingStrategy):
             audio_targets=audio_result.targets if audio_result else None,
             video_loss_mask=video_result.loss_mask if video_result else None,
             audio_loss_mask=audio_result.loss_mask if audio_result else None,
+            video_clean_latents=video_result.clean_latents if video_result else None,
+            video_target_start_index=video_result.target_start_index if video_result else None,
         )
 
     def compute_loss(
@@ -311,6 +323,37 @@ class FlexibleStrategy(TrainingStrategy):
             raise ValueError("No valid predictions and targets provided for loss computation")
 
         return total_loss
+
+    def compute_clean_rgb_sra_loss(
+        self, clean_rgb_pred: Tensor, inputs: ModelInputs, global_step: int
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """Align target hidden states with detached clean RGB VAE latents."""
+        if inputs.video_clean_latents is None:
+            raise ValueError("Clean RGB SRA requires clean target video latents")
+        target = inputs.video_clean_latents.to(device=clean_rgb_pred.device, dtype=torch.float32).detach()
+        if clean_rgb_pred.shape != target.shape:
+            raise ValueError(
+                f"Clean RGB SRA prediction shape {tuple(clean_rgb_pred.shape)} "
+                f"does not match target shape {tuple(target.shape)}"
+            )
+        token_loss = torch.nn.functional.smooth_l1_loss(
+            clean_rgb_pred.float(), target, reduction="none", beta=float(self.config.clean_rgb_sra_beta)
+        ).mean(dim=-1)
+        if inputs.video_loss_mask is None or inputs.video_target_start_index is None:
+            raise ValueError("Clean RGB SRA requires the target video loss mask")
+        target_mask = inputs.video_loss_mask[:, inputs.video_target_start_index :].to(token_loss.device).float()
+        raw_loss = (token_loss * target_mask).sum(dim=1) / target_mask.sum(dim=1).clamp(min=1.0)
+        weight = float(self.config.clean_rgb_sra_loss_weight)
+        warmup = int(self.config.clean_rgb_sra_warmup_steps)
+        if warmup > 0:
+            weight *= min(1.0, max(int(global_step), 0) / float(warmup))
+        weight_tensor = torch.tensor(weight, device=clean_rgb_pred.device, dtype=torch.float32)
+        weighted = raw_loss * weight_tensor
+        return weighted, {
+            "train/clean_rgb_sra_raw": raw_loss.detach().mean(),
+            "train/clean_rgb_sra_loss": weighted.detach().mean(),
+            "train/clean_rgb_sra_weight": weight_tensor.detach(),
+        }
 
     def get_checkpoint_metadata(self) -> dict[str, Any]:
         """Include reference scale factors in checkpoint metadata for inference pipelines."""
@@ -368,6 +411,7 @@ class FlexibleStrategy(TrainingStrategy):
         # Step 1: Load and patchify latents
         data = self._patchify_latent_data(batch[f"{modality_key}_latents"], modality_key)
         latents = data.latents
+        clean_target_latents = latents if modality_config.is_generated and modality_key == "video" else None
 
         batch_size, seq_len, _ = latents.shape
         device = latents.device
@@ -451,6 +495,8 @@ class FlexibleStrategy(TrainingStrategy):
             modality=modality,
             targets=targets,
             loss_mask=loss_mask,
+            clean_latents=clean_target_latents,
+            target_start_index=noisy_latents.shape[1] - seq_len if modality_config.is_generated else None,
         )
 
     @staticmethod
