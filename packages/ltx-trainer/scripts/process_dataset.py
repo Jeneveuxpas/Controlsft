@@ -8,6 +8,7 @@ Convention table:
     video           → Video VAE    → latents/
     audio           → Audio VAE    → audio_latents/
     reference_video → Video VAE    → reference_latents/
+    reference_video_1 → Video VAE  → reference_latents_1/
     reference_audio → Audio VAE    → reference_audio_latents/
     video_mask      → (downsample) → video_masks/
     audio_mask      → (downsample) → audio_masks/
@@ -43,12 +44,25 @@ app = typer.Typer(
     pretty_exceptions_enable=False,
     no_args_is_help=True,
     help="Preprocess a media dataset for LTX-2 training. "
-    "Automatically detects columns (video, audio, reference_video, reference_audio, caption) "
+    "Automatically detects columns (video, audio, reference_video, reference_video_1, reference_audio, caption) "
     "and processes each with the appropriate encoder.",
 )
 
-_KNOWN_ROLES = {"video", "audio", "reference_video", "reference_audio", "video_mask", "audio_mask", "caption"}
+_KNOWN_ROLES = {
+    "video",
+    "audio",
+    "reference_video",
+    "reference_video_1",
+    "reference_audio",
+    "video_mask",
+    "audio_mask",
+    "caption",
+}
 _LEGACY_ALIASES = {"media_path": "video", "ref_media_path": "reference_video"}
+_REFERENCE_VIDEO_OUTPUTS = (
+    ("reference_video", "reference_latents"),
+    ("reference_video_1", "reference_latents_1"),
+)
 
 
 def preprocess_dataset(  # noqa: PLR0912, PLR0913, PLR0915
@@ -78,6 +92,9 @@ def preprocess_dataset(  # noqa: PLR0912, PLR0913, PLR0915
     # Detect columns and resolve roles
     dataset_columns = detect_dataset_columns(dataset_file)
     roles = _resolve_columns(dataset_columns, video_column, caption_column)
+
+    if "reference_video_1" in roles and "reference_video" not in roles:
+        raise ValueError("Column reference_video_1 requires the primary reference_video column.")
 
     # Log detected roles
     for role, col in sorted(roles.items()):
@@ -126,7 +143,7 @@ def preprocess_dataset(  # noqa: PLR0912, PLR0913, PLR0915
             overwrite=overwrite,
         )
 
-    # --- Phase 2: Video VAE (video, reference_video) ---
+    # --- Phase 2: Video VAE (video and ordered reference videos) ---
     if has_video and resolution_buckets:
         # Determine if audio should be auto-extracted from video files
         auto_audio = not skip_audio and "audio" not in roles
@@ -150,8 +167,12 @@ def preprocess_dataset(  # noqa: PLR0912, PLR0913, PLR0915
                 overwrite=overwrite,
             )
 
-        # Process reference video if present
-        if "reference_video" in roles:
+        # Process ordered reference videos if present. The primary control is written
+        # to reference_latents/ and the second control to reference_latents_1/.
+        active_reference_videos = [
+            (role, output_dir) for role, output_dir in _REFERENCE_VIDEO_OUTPUTS if role in roles
+        ]
+        if active_reference_videos:
             if reference_downscale_factor > 1 and len(resolution_buckets) > 1:
                 raise ValueError(
                     "When using --reference-downscale-factor > 1, only a single resolution bucket is supported."
@@ -170,20 +191,22 @@ def preprocess_dataset(  # noqa: PLR0912, PLR0913, PLR0915
                     f"(VAE-aligned pattern)..."
                 )
 
-            with free_gpu_memory_context():
-                compute_latents(
-                    dataset_file=dataset_file,
-                    main_media_column=roles["video"],
-                    video_column=roles["reference_video"],
-                    resolution_buckets=reference_buckets,
-                    output_dir=str(output_base / "reference_latents"),
-                    model_path=model_path,
-                    batch_size=batch_size,
-                    device=device,
-                    vae_tiling=vae_tiling,
-                    overwrite=overwrite,
-                    temporal_subsample_factor=reference_temporal_scale_factor,
-                )
+            for role, output_dir in active_reference_videos:
+                logger.info(f"Processing {role!r} → {output_dir}/")
+                with free_gpu_memory_context():
+                    compute_latents(
+                        dataset_file=dataset_file,
+                        main_media_column=roles["video"],
+                        video_column=roles[role],
+                        resolution_buckets=reference_buckets,
+                        output_dir=str(output_base / output_dir),
+                        model_path=model_path,
+                        batch_size=batch_size,
+                        device=device,
+                        vae_tiling=vae_tiling,
+                        overwrite=overwrite,
+                        temporal_subsample_factor=reference_temporal_scale_factor,
+                    )
 
     # --- Phase 2b: Masks (video_mask, audio_mask) — processed after video latents for alignment ---
     if "video_mask" in roles and has_video:
@@ -245,8 +268,13 @@ def preprocess_dataset(  # noqa: PLR0912, PLR0913, PLR0915
         decoder = LatentsDecoder(model_path=model_path, device=device, vae_tiling=vae_tiling, with_audio=has_audio)
         if has_video:
             decoder.decode(output_base / "latents", output_base / "decoded_videos")
-        if "reference_video" in roles and (output_base / "reference_latents").exists():
-            decoder.decode(output_base / "reference_latents", output_base / "decoded_reference_videos")
+        for role, output_dir in _REFERENCE_VIDEO_OUTPUTS:
+            encoded_dir = output_base / output_dir
+            if role in roles and encoded_dir.exists():
+                decoded_dir = (
+                    "decoded_reference_videos" if role == "reference_video" else f"decoded_{output_dir}"
+                )
+                decoder.decode(encoded_dir, output_base / decoded_dir)
 
     # --- Summary ---
     logger.info(f"Dataset preprocessing complete! Results saved to {output_base}")
