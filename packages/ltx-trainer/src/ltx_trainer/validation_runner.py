@@ -585,6 +585,37 @@ class ValidationRunner:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _move_appended_video_references_to_prefix(state: LatentState, target_len: int) -> LatentState:
+        """Match training's ``[references..., target]`` token layout.
+
+        ``VideoConditionByReferenceLatent`` appends reference tokens for the
+        general inference API, while the flexible IC-LoRA training strategy
+        prepends them. Reorder every token-indexed state field after all
+        references have been applied so validation exercises the trained layout.
+        """
+        total_len = state.latent.shape[1]
+        if total_len == target_len:
+            return state
+
+        token_order = torch.cat(
+            [
+                torch.arange(target_len, total_len, device=state.latent.device),
+                torch.arange(target_len, device=state.latent.device),
+            ]
+        )
+        attention_mask = state.attention_mask
+        if attention_mask is not None:
+            attention_mask = attention_mask.index_select(1, token_order).index_select(2, token_order)
+
+        return LatentState(
+            latent=state.latent.index_select(1, token_order),
+            denoise_mask=state.denoise_mask.index_select(1, token_order),
+            positions=state.positions.index_select(2, token_order),
+            clean_latent=state.clean_latent.index_select(1, token_order),
+            attention_mask=attention_mask,
+        )
+
+    @staticmethod
     def _apply_video_conditionings(
         state: LatentState,
         tools: VideoLatentTools,
@@ -592,10 +623,13 @@ class ValidationRunner:
         cached_media: CachedSampleMedia,
         device: torch.device,
     ) -> LatentState:
-        """Apply all video-targeting conditionings from the sample's conditions list."""
+        """Apply video conditions, then prepend ordered IC-LoRA references."""
         for cond_idx, cond in enumerate(sample.conditions):
             media = cached_media.conditions.get(cond_idx)
             if media is None:
+                continue
+
+            if cond.type == "reference" and getattr(cond, "video", None) is not None:
                 continue
 
             latent = media.latent.to(device=device, dtype=torch.bfloat16)
@@ -611,14 +645,6 @@ class ValidationRunner:
                     state, tools
                 )
 
-            elif cond.type == "reference" and cond.video is not None:
-                state = VideoConditionByReferenceLatent(
-                    latent=latent,
-                    downscale_factor=cond.downscale_factor,
-                    temporal_scale_factor=cond.temporal_scale_factor,
-                    strength=1.0,
-                ).apply_to(state, tools)
-
             elif cond.type == "mask":
                 mask = media.mask.to(device=device)
                 state = VideoConditionByMask(latent=latent, mask=mask, strength=1.0).apply_to(state, tools)
@@ -626,6 +652,28 @@ class ValidationRunner:
             elif cond.type == "spatial_crop":
                 mask = _build_spatial_crop_mask(cond.spatial_region, tools.target_shape, device)
                 state = VideoConditionByMask(latent=latent, mask=mask, strength=1.0).apply_to(state, tools)
+
+        target_len = state.latent.shape[1]
+        has_video_reference = False
+        for cond_idx, cond in enumerate(sample.conditions):
+            if cond.type != "reference" or getattr(cond, "video", None) is None:
+                continue
+
+            media = cached_media.conditions.get(cond_idx)
+            if media is None:
+                continue
+
+            latent = media.latent.to(device=device, dtype=torch.bfloat16)
+            state = VideoConditionByReferenceLatent(
+                latent=latent,
+                downscale_factor=cond.downscale_factor,
+                temporal_scale_factor=cond.temporal_scale_factor,
+                strength=1.0,
+            ).apply_to(state, tools)
+            has_video_reference = True
+
+        if has_video_reference:
+            state = ValidationRunner._move_appended_video_references_to_prefix(state, target_len)
 
         return state
 
