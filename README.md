@@ -145,3 +145,5 @@ Each package includes comprehensive documentation:
 * **[LTX-Core README](packages/ltx-core/README.md)** - Core model implementation, inference stack, and utilities
 * **[LTX-Pipelines README](packages/ltx-pipelines/README.md)** - High-level pipeline implementations and usage guides
 * **[LTX-Trainer README](packages/ltx-trainer/README.md)** - Training and fine-tuning documentation with detailed guides
+
+# Controlsft
