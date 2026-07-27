@@ -1,149 +1,137 @@
-# LTX-2
-
-[![Website](https://img.shields.io/badge/Website-LTX-181717?logo=google-chrome)](https://ltx.io)
-[![Model](https://img.shields.io/badge/HuggingFace-Model-orange?logo=huggingface)](https://huggingface.co/Lightricks/LTX-2.3)
-[![Demo](https://img.shields.io/badge/Demo-Try%20Now-brightgreen?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAYAAACNiR0NAAAAAXNSR0IArs4c6QAAAERlWElmTU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAFKADAAQAAAABAAAAFAAAAACy3fD9AAACmElEQVQ4Ea1VP2haYRA/fRo0mESRIIqb2IwxuNUl0CGFQBC6OAWcikMottCpqYtDQIgdQsBFhAjZqiQhbhmySJBOgmNU0EGCg9r61Bivd0ffoykE0iQH37/77n7f3e/uqQFIPB7P/N3d3QeDwfAFEedZ91ghnyH5JM1m87dWq6UavF6vdTKZfDcajW/p4rE49+wIFMj33Gq1vlNo+kxg758KpiETqP/29vaXweVyqaS0aBfPXEfGFwTjWCwM+KBQoWA4HAJx/KDNvxcmTTGbzYAH8SljOp2C2+2GjY0NqNfrcHFxAXNzc2LDfCuKIq78KBdFOwsgGzidTnA4HHBzcwO9Xg8sFgtsbm7C3t4eVCoVaDQa0O12YXl5GUwmk5z5cZ/PB6PRCNrttgADFQUXFhbw8PAQVVXF3d1dJAeMx+P0zn0Jh8OYz+eRADCRSGAqlcLxeIz7+/u4tLSEjKUDZrNZ8U4mk0jR4fr6Op6enoru+voa0+k0rq2tYTAYxE6ng9QiSLRgrVZDv9+PFLkA6kUhT+GEC8C8XF5ewtHRkejICShiaDabwPvj42NJm3k7ODiQdDl9Fr0ocqJpdXUVIpEIdz7Y7XZRr6ysQDQahXK5LORvbW1p5rC9vQ2UifAooBqHuVxO0vt72tnZwWq1qqtisRgWCgU5ZzIZPDk50fdUUEmZvxTmAgKBgAxunT/fJpRKJWmhUCgEVDi4uroSG46kWCzC4uKitNVgMICzszOhSgA5fiJZhp4Lbbh1KARpbF65D/lx3vMdP05Vlkf5zKIDyukFJi7N6AVwNAhVsdlsM+LsjaZ56sq8kyQUqs4P6rsAKV49B4x4Padf7Y9Kv9+fEmiBQH8S4Gsa5v8EHpL9VwL7xH8BvwEcd4ccVf02KQAAAABJRU5ErkJggg==)](https://console.ltx.video/playground)
-[![Paper](https://img.shields.io/badge/Paper-PDF-EC1C24?logo=adobeacrobatreader&logoColor=white)](https://arxiv.org/abs/2601.03233)
-[![Discord](https://img.shields.io/badge/Join-Discord-5865F2?logo=discord)](https://discord.gg/ltxplatform)
-
-**LTX-2** is the first DiT-based audio-video foundation model that contains all core capabilities of modern video generation in one model: synchronized audio and video, high fidelity, multiple performance modes, production-ready outputs, API access, and open access.
-
-<div align="center">
-  <video src="https://github.com/user-attachments/assets/4414adc0-086c-43de-b367-9362eeb20228" width="70%" poster=""> </video>
-</div>
-
-## 🚀 Quick Start
-
-Clone the repo
-
-```bash
-git clone https://github.com/Lightricks/LTX-2.git
-cd LTX-2
-```
-
-Download the relevant [models](https://huggingface.co/Lightricks/LTX-2.3) or use the [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/guides/cli)
-
-```bash
-hf auth login
-hf download Lightricks/LTX-2.3 \
-    ltx-2.3-22b-distilled-1.1.safetensors ltx-2.3-spatial-upscaler-x2-1.1.safetensors --local-dir models/ltx-2.3
-hf download google/gemma-3-12b-it-qat-q4_0-unquantized --local-dir models/gemma-3-12b
-```
-
-If you get a 401/403, accept the model terms on Hugging Face and log in with a **Read** token (fine-grained tokens need the "read gated repos" scope enabled).
-
-Generate
-
-```bash
-uv run python -m ltx_pipelines.distilled \
-    --distilled-checkpoint-path models/ltx-2.3/ltx-2.3-22b-distilled-1.1.safetensors \
-    --spatial-upsampler-path    models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
-    --gemma-root models/gemma-3-12b \
-    --seed 42 \
-    --output-path output.mp4 \
-    --prompt "A medium close-up shot features a Caucasian man with a beard, wearing a green and white baseball cap without any letters on the front, and a light blue shirt over a white t-shirt. He is positioned in the center of the frame, looking intently directly at the camera, his eyes focused on camera. His facial expression is one of deep concentration, with his brow slightly raised. As he looks straight at the camera, a quick sniff sound is heard, and then he speaks with a deep male voice and a satisfied tone, saying, 'I think it's so good.' The camera remains static throughout, maintaining a shallow depth of field, which keeps the man in sharp focus while the background is softly blurred, showing a beige wall behind him. After a brief pause, another short, audible sniff is heard. The man then continues to speak, his voice maintaining the same quality, as he states, 'So good. So good.' He elaborates further, emphasizing his point with a final statement, 'This got to be, it's got to be the best tool I've ever seen.'"
-```
-
-In cases of GPU memory constraints, consider `--quantization fp8-cast --offload {cpu, disk}`. See [additional flags](packages/ltx-pipelines/docs/installation.md#common-cli-flags).
-
-This uses the distilled model and pipeline for fast results. For better quality or other capabilities, see [Models](#full-model-list) and [Pipelines](#available-pipelines).
-
-### Full Model List
-
-For pipelines beyond the quickstart, download the relevant models from the [LTX-2.3 HuggingFace repository](https://huggingface.co/Lightricks/LTX-2.3):
-
-**LTX-2.3 Model Checkpoint** (choose and download one of the following)
-  * [`ltx-2.3-22b-dev.safetensors`](https://huggingface.co/Lightricks/LTX-2.3/blob/main/ltx-2.3-22b-dev.safetensors) - [Download](https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-dev.safetensors)
-  * [`ltx-2.3-22b-distilled-1.1.safetensors`](https://huggingface.co/Lightricks/LTX-2.3/blob/main/ltx-2.3-22b-distilled-1.1.safetensors) - [Download](https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled-1.1.safetensors)
-
-**Spatial Upscaler** - Required for current two-stage pipeline implementations in this repository
-  * [`ltx-2.3-spatial-upscaler-x2-1.1.safetensors`](https://huggingface.co/Lightricks/LTX-2.3/blob/main/ltx-2.3-spatial-upscaler-x2-1.1.safetensors) - [Download](https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.1.safetensors)
-  * [`ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors`](https://huggingface.co/Lightricks/LTX-2.3/blob/main/ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors) - [Download](https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors)
-
-**Temporal Upscaler** - Supported by the model and will be required for future pipeline implementations
-  * [`ltx-2.3-temporal-upscaler-x2-1.0.safetensors`](https://huggingface.co/Lightricks/LTX-2.3/blob/main/ltx-2.3-temporal-upscaler-x2-1.0.safetensors) - [Download](https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-temporal-upscaler-x2-1.0.safetensors)
-
-**Distilled LoRA** - Required for current two-stage pipeline implementations in this repository (except DistilledPipeline, ICLoraPipeline, and LipDubPipeline)
-  * [`ltx-2.3-22b-distilled-lora-384-1.1.safetensors`](https://huggingface.co/Lightricks/LTX-2.3/blob/main/ltx-2.3-22b-distilled-lora-384-1.1.safetensors) - [Download](https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled-lora-384-1.1.safetensors)
-
-**Gemma Text Encoder** (download all assets from the repository)
-  * [`Gemma 3`](https://huggingface.co/google/gemma-3-12b-it-qat-q4_0-unquantized/tree/main)
-
-**LoRAs**
-  * [`LTX-2.3-22b-IC-LoRA-Union-Control`](https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control) - [Download](https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control/resolve/main/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors)
-  * [`LTX-2.3-22b-IC-LoRA-Motion-Track-Control`](https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control) - [Download](https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control/resolve/main/ltx-2.3-22b-ic-lora-motion-track-control-ref0.5.safetensors)
-  * [`LTX-2-19b-IC-LoRA-Detailer`](https://huggingface.co/Lightricks/LTX-2-19b-IC-LoRA-Detailer) - [Download](https://huggingface.co/Lightricks/LTX-2-19b-IC-LoRA-Detailer/resolve/main/ltx-2-19b-ic-lora-detailer.safetensors)
-  * [`LTX-2-19b-IC-LoRA-Pose-Control`](https://huggingface.co/Lightricks/LTX-2-19b-IC-LoRA-Pose-Control) - [Download](https://huggingface.co/Lightricks/LTX-2-19b-IC-LoRA-Pose-Control/resolve/main/ltx-2-19b-ic-lora-pose-control.safetensors)
-  * [`LTX-2-19b-LoRA-Camera-Control-Dolly-In`](https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-In) - [Download](https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-In/resolve/main/ltx-2-19b-lora-camera-control-dolly-in.safetensors)
-  * [`LTX-2-19b-LoRA-Camera-Control-Dolly-Left`](https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-Left) - [Download](https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-Left/resolve/main/ltx-2-19b-lora-camera-control-dolly-left.safetensors)
-  * [`LTX-2-19b-LoRA-Camera-Control-Dolly-Out`](https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-Out) - [Download](https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-Out/resolve/main/ltx-2-19b-lora-camera-control-dolly-out.safetensors)
-  * [`LTX-2-19b-LoRA-Camera-Control-Dolly-Right`](https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-Right) - [Download](https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-Right/resolve/main/ltx-2-19b-lora-camera-control-dolly-right.safetensors)
-  * [`LTX-2-19b-LoRA-Camera-Control-Jib-Down`](https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Jib-Down) - [Download](https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Jib-Down/resolve/main/ltx-2-19b-lora-camera-control-jib-down.safetensors)
-  * [`LTX-2-19b-LoRA-Camera-Control-Jib-Up`](https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Jib-Up) - [Download](https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Jib-Up/resolve/main/ltx-2-19b-lora-camera-control-jib-up.safetensors)
-  * [`LTX-2-19b-LoRA-Camera-Control-Static`](https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Static) - [Download](https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Static/resolve/main/ltx-2-19b-lora-camera-control-static.safetensors)
-  * [`LTX-2.3-22b-IC-LoRA-HDR`](https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-HDR) - HDR IC-LoRA and pre-computed text embeddings for `HDRICLoraPipeline`
-  * [`LTX-2.3-22b-IC-LoRA-LipDub`](https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-LipDub) - [Download](https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-LipDub/resolve/main/ltx-2.3-22b-ic-lora-lipdub-0.9.safetensors)
-
-### Available Pipelines
-
-* **[TI2VidTwoStagesPipeline](packages/ltx-pipelines/src/ltx_pipelines/ti2vid_two_stages.py)** - Production-quality text/image-to-video with 2x upsampling (recommended)
-* **[TI2VidTwoStagesHQPipeline](packages/ltx-pipelines/src/ltx_pipelines/ti2vid_two_stages_hq.py)** - Same two-stage flow as above but uses the res_2s second-order sampler (fewer steps, better quality)
-* **[TI2VidOneStagePipeline](packages/ltx-pipelines/src/ltx_pipelines/ti2vid_one_stage.py)** - Single-stage generation for quick prototyping
-* **[DistilledPipeline](packages/ltx-pipelines/src/ltx_pipelines/distilled.py)** - Fastest inference with 8 predefined sigmas
-* **[ICLoraPipeline](packages/ltx-pipelines/src/ltx_pipelines/ic_lora.py)** - Video-to-video and image-to-video transformations (uses distilled model.)
-* **[KeyframeInterpolationPipeline](packages/ltx-pipelines/src/ltx_pipelines/keyframe_interpolation.py)** - Interpolate between keyframe images
-* **[A2VidPipelineTwoStage](packages/ltx-pipelines/src/ltx_pipelines/a2vid_two_stage.py)** - Audio-to-video generation conditioned on an input audio file
-* **[RetakePipeline](packages/ltx-pipelines/src/ltx_pipelines/retake.py)** - Regenerate a specific time region of an existing video
-* **[HDRICLoraPipeline](packages/ltx-pipelines/src/ltx_pipelines/hdr_ic_lora.py)** - Video-to-video with HDR output (linear float frames via LogC3 inverse decode, suitable for EXR export and tonemapping)
-* **[LipDubPipeline](packages/ltx-pipelines/src/ltx_pipelines/lipdub.py)** - Lip dubbing, rephrasing, matching speaker identity (distilled model, single IC-LoRA, Two stages).
-
-### ⚡ Optimization Tips
-
-* **Use DistilledPipeline** - Fastest inference with only 8 predefined sigmas (8 steps stage 1, 4 steps stage 2)
-* **Enable FP8 quantization** - Enables lower memory footprint: `--quantization fp8-cast` (CLI) or `quantization=QuantizationPolicy.fp8_cast()` (Python). Fp8-cast should be used with bf16 checkpoints, it shall downcast them on the fly. On Hopper+ GPUs with native FP8 support, use `--quantization fp8-scaled-mm` for FP8 scaled matrix multiplication. Fp8-scaled-mm should be used with fp8 checkpoints.
-* **Install attention optimizations** - On datacenter Blackwell GPUs (B200), install FlashAttention 4 manually: `uv pip install 'flash-attn-4==4.0.0b9'` (this specific revision is the one we have verified against torch 2.9.1+cu128; newer betas have known issues on consumer Blackwell). On Hopper GPUs, install the FlashAttention 3 wheel. On other CUDA GPUs, PyTorch SDPA is used automatically. An installed backend is selected automatically at runtime; forcing a specific one is a Python-API option (`AttentionFunction.FLASH_ATTENTION_3`/`FLASH_ATTENTION_4`), not a CLI flag.
-* **Use gradient estimation** - Reduce inference steps from 40 to 20-30 while maintaining quality (see [pipeline documentation](packages/ltx-pipelines/docs/optimization.md#denoising-loop-optimization))
-* **Skip memory cleanup** - If you have sufficient VRAM, disable automatic memory cleanup between stages for faster processing
-* **Choose single-stage pipeline** - Use `TI2VidOneStagePipeline` for faster generation when high resolution isn't required
-
-## ✍️ Prompting for LTX-2
-
-When writing prompts, focus on detailed, chronological descriptions of actions and scenes. Include specific movements, appearances, camera angles, and environmental details - all in a single flowing paragraph. Start directly with the action, and keep descriptions literal and precise. Think like a cinematographer describing a shot list. Keep within 200 words. For best results, build your prompts using this structure:
-
-- Start with main action in a single sentence
-- Add specific details about movements and gestures
-- Describe character/object appearances precisely
-- Include background and environment details
-- Specify camera angles and movements
-- Describe lighting and colors
-- Note any changes or sudden events
-
-For additional guidance on writing a prompt please refer to <https://ltx.io/blog/prompting-guide-for-ltx-2>
-
-### Automatic Prompt Enhancement
-
-LTX-2 pipelines support automatic prompt enhancement via an `enhance_prompt` parameter.
-
-## 🔌 ComfyUI Integration
-
-To use our model with ComfyUI, please follow the instructions at <https://github.com/Lightricks/ComfyUI-LTXVideo/>.
-
-## 📦 Packages
-
-This repository is organized as a monorepo with three main packages:
-
-* **[ltx-core](packages/ltx-core/)** - Core model implementation, inference stack, and utilities
-* **[ltx-pipelines](packages/ltx-pipelines/)** - High-level pipeline implementations for text-to-video, image-to-video, and other generation modes
-* **[ltx-trainer](packages/ltx-trainer/)** - Training and fine-tuning tools for LoRA, full fine-tuning, and IC-LoRA
-
-Each package has its own README and documentation. See the [Documentation](#-documentation) section below.
-
-## 📚 Documentation
-
-Each package includes comprehensive documentation:
-
-* **[LTX-Core README](packages/ltx-core/README.md)** - Core model implementation, inference stack, and utilities
-* **[LTX-Pipelines README](packages/ltx-pipelines/README.md)** - High-level pipeline implementations and usage guides
-* **[LTX-Trainer README](packages/ltx-trainer/README.md)** - Training and fine-tuning documentation with detailed guides
-
 # Controlsft
+
+> [!IMPORTANT]
+> 本仓库的 `main` 分支是基于官方 LTX-2 的 Controlsft 研究分支，当前只增加：
+> **两个有序视频控制条件（Part16 + Depth）**和 **Clean RGB SRA 辅助监督**。
+> 官方基线为 [`Lightricks/LTX-2@9377758`](https://github.com/Lightricks/LTX-2/tree/9377758131b1ffde4b7f766804590a6617bf2ab9)。
+
+## Controlsft：相比官方代码修改了什么
+
+### 1. 目标与明确边界
+
+当前实现研究的是两个控制视频共同约束 RGB 视频生成：
+
+```text
+Part16 control ─┐
+                ├─ VAE tokens ── [Part16 | Depth | noisy RGB target] ── LTX-2
+Depth control ──┘                                      │
+                                                      ├─ official flow-matching loss
+clean RGB target ── VAE x0 ───────────────────────────└─ Clean RGB SRA loss
+```
+
+- Part16 和 Depth 只作为 clean reference token：`timestep=0`，不加噪，不计算生成 loss。
+- RGB target 使用官方 flow-matching 训练目标。
+- Clean RGB SRA 从指定 transformer 中间层的 **RGB target token** 预测 detached clean RGB VAE latent `x0`。
+- 总 loss 为 `L_total = L_official_flow + λ(step) * L_clean_rgb_sra`。
+- 没有加入 foreground loss、Part16/Depth 重建 loss、XYZ loss、蒸馏 loss或其他辅助 loss。
+- `packages/ltx-core`、`packages/ltx-pipelines`、官方 transformer 主体和 VAE 均未修改。
+
+### 2. 两个控制条件的数据与 token 顺序
+
+每条数据必须是一一对应的四列：
+
+| Dataset column | 含义 | 预处理输出 |
+| --- | --- | --- |
+| `video` | RGB target | `latents/` |
+| `reference_video` | 第一个控制，当前约定为 Part16 | `reference_latents/` |
+| `reference_video_1` | 第二个控制，当前约定为 Depth | `reference_latents_1/` |
+| `caption` | 文本条件 | `conditions/` |
+
+最终训练和验证的 token 布局都固定为：
+
+```text
+[reference_latents (Part16) | reference_latents_1 (Depth) | RGB target]
+```
+
+官方 flexible strategy 每次都会把 reference prepend 到序列前面，因此按配置正序应用两个
+reference 会意外得到反序。本分支按配置的逆序执行 prepend，使最终 token 顺序仍与 YAML
+声明顺序一致。验证器也显式重排为同一布局，避免出现“训练是一个顺序、validation 是另一个顺序”。
+
+数据代码只保证文件/latent 的对应关系，不会判断视频内容是否时间对齐。RGB、Part16、Depth 必须在进入
+VAE 前具有相同 clip 起止时间、帧数和目标分辨率；不要用旧控制视频缩放来替代同一 mesh 的原分辨率渲染。
+
+### 3. Clean RGB SRA
+
+SRA head 位于 [`packages/ltx-trainer/src/ltx_trainer/sra.py`](packages/ltx-trainer/src/ltx_trainer/sra.py)，
+结构为逐 token 的：
+
+```text
+LayerNorm → Linear → GELU → 3 × residual linear block → LayerNorm → Linear
+```
+
+训练时在 transformer block `clean_rgb_sra_hidden_layer` 注册临时 forward hook，只截取 target 段 hidden：
+
+1. SRA head 输出与 patchified clean RGB VAE latent 维度一致。
+2. target `x0` 在计算 SRA loss 前 `detach()`，梯度只回到 SRA head 和 transformer/LoRA。
+3. 使用 SmoothL1 loss，并沿用 RGB target 的有效 loss mask。
+4. `clean_rgb_sra_loss_weight` 在前 `clean_rgb_sra_warmup_steps` 内线性 warm up。
+5. SRA head 可使用独立学习率，并作为单独的 `.pt` 文件保存/加载。
+
+当前示例配置：
+
+| 参数 | 示例值 | 作用 |
+| --- | ---: | --- |
+| `clean_rgb_sra_loss_weight` | `0.05` | warmup 完成后的 SRA loss 权重 |
+| `clean_rgb_sra_hidden_layer` | `8` | 捕获 block index 8（从 0 开始，即第 9 个 block）的输出 |
+| `clean_rgb_sra_hidden_dim` | `1024` | SRA projector hidden width |
+| `clean_rgb_sra_warmup_steps` | `100` | loss 权重线性 warmup |
+| `clean_rgb_sra_beta` | `0.05` | SmoothL1 beta |
+| `clean_rgb_sra_learning_rate` | `null` | `null` 表示跟随主 optimizer LR |
+| `clean_rgb_sra_checkpoint` | `null` | 可选的 SRA head warm-start checkpoint |
+
+SRA checkpoint 保存到：
+
+```text
+<output_dir>/checkpoints/clean_rgb_sra_head_step_XXXXX.pt
+```
+
+W&B 新增指标：
+
+- `train/clean_rgb_sra_raw`
+- `train/clean_rgb_sra_loss`
+- `train/clean_rgb_sra_weight`
+
+### 4. 修改文件索引
+
+| 文件 | 相比官方代码的修改 |
+| --- | --- |
+| [`process_dataset.py`](packages/ltx-trainer/scripts/process_dataset.py) | 识别 `reference_video_1`，用同一个 Video VAE 独立生成 `reference_latents_1/`，并检查第二控制不能脱离第一控制单独存在。 |
+| [`flexible.py`](packages/ltx-trainer/src/ltx_trainer/training_strategies/flexible.py) | 保持多 reference 的 YAML 声明顺序；保留 clean RGB target latent 和 target 起始 index；实现 Clean RGB SRA loss。 |
+| [`base_strategy.py`](packages/ltx-trainer/src/ltx_trainer/training_strategies/base_strategy.py) | 在 `ModelInputs` 增加 `video_clean_latents` 和 `video_target_start_index`。 |
+| [`sra.py`](packages/ltx-trainer/src/ltx_trainer/sra.py) | 新增 Clean RGB SRA projector。 |
+| [`trainer.py`](packages/ltx-trainer/src/ltx_trainer/trainer.py) | 创建/加载 SRA head；捕获中间层；叠加 SRA loss；支持独立 LR、checkpoint 和 W&B metrics。 |
+| [`validation_runner.py`](packages/ltx-trainer/src/ltx_trainer/validation_runner.py) | 将官方 append 后的 reference 重排到 target 前面，使 validation 与 training 同为 `[Part16 | Depth | target]`。 |
+| [`v2v_two_control_ic_lora.yaml`](packages/ltx-trainer/configs/v2v_two_control_ic_lora.yaml) | 新增两个有序 reference 的完整示例和 Clean RGB SRA 参数。 |
+| [`tests/`](packages/ltx-trainer/tests/) | 增加双控制预处理、reference 顺序、配置、SRA detach/warmup/mask 和 validation 布局测试。 |
+
+### 5. 与官方保持一致的部分
+
+- 官方 LTX-2 checkpoint 加载、Gemma text embedding、Video VAE 和 RoPE/position 生成逻辑。
+- 官方 LoRA target modules、PEFT 包装、optimizer、gradient accumulation 和 checkpoint 主流程。
+- 官方 RGB flow-matching target、timestep sampler 和主 loss。
+- reference token 仍使用官方 IC-LoRA 的 clean-token conditioning 机制。
+
+示例配置的 `model.load_checkpoint` 当前为 `null`，因此默认是官方 base model 加新初始化的 LoRA，
+**不会自动加载某个官方 IC-LoRA adapter**。如果实验要求从官方 IC-LoRA 权重初始化，需要在配置中
+显式填写兼容 checkpoint，并在实验记录中注明。
+
+### 6. 配置、启动与对照
+
+先修改示例中的模型路径、数据路径、validation 视频、分辨率、steps 和 W&B：
+
+```bash
+cd packages/ltx-trainer
+uv run accelerate launch scripts/train.py configs/v2v_two_control_ic_lora.yaml
+```
+
+示例 YAML 是代码接口说明，不包含集群私有路径或实验数据。分辨率并未硬编码在训练实现中：
+训练分辨率由预计算 latent 决定，validation 分辨率由 `validation.video_dims` 决定。
+
+查看本分支相对官方基线的全部代码差异：
+
+```bash
+git diff 9377758..main -- packages/ltx-trainer
+git log --oneline 9377758..main
+```
+
+当前相关回归测试共 7 个，最后一次执行结果为 `7 passed`。
