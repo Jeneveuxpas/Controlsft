@@ -531,13 +531,19 @@ class LtxvTrainer:
         input_dim = int(base.inner_dim)
         output_dim = int(base.proj_out.out_features)
         hidden_dim = self._config.training_strategy.clean_rgb_sra_hidden_dim or max(512, input_dim // 4)
-        head = CleanRGBSRAHead(input_dim=input_dim, hidden_dim=int(hidden_dim), output_dim=output_dim)
+        num_layers = int(self._config.training_strategy.clean_rgb_sra_num_layers)
+        head = CleanRGBSRAHead(
+            input_dim=input_dim,
+            hidden_dim=int(hidden_dim),
+            output_dim=output_dim,
+            num_layers=num_layers,
+        )
         head = head.to(dtype=next(base.parameters()).dtype)
         base.clean_rgb_sra_head = head
         head.requires_grad_(True)
         self._trainable_params.extend(head.parameters())
         logger.info(
-            f"Enabled Clean RGB SRA: layer={layer}, hidden_dim={hidden_dim}, "
+            f"Enabled Clean RGB SRA: layer={layer}, hidden_dim={hidden_dim}, projector_layers={num_layers}, "
             f"weight={self._config.training_strategy.clean_rgb_sra_loss_weight}"
         )
 
@@ -1106,6 +1112,7 @@ class LtxvTrainer:
                 "global_step": int(self._global_step),
                 "clean_rgb_sra_hidden_layer": int(self._config.training_strategy.clean_rgb_sra_hidden_layer),
                 "clean_rgb_sra_hidden_dim": self._config.training_strategy.clean_rgb_sra_hidden_dim,
+                "clean_rgb_sra_num_layers": int(self._config.training_strategy.clean_rgb_sra_num_layers),
             },
         }
         path = save_dir / f"clean_rgb_sra_head_step_{self._global_step:05d}.pt"

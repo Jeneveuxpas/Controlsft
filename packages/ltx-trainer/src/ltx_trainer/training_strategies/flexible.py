@@ -174,6 +174,7 @@ class FlexibleStrategyConfig(TrainingStrategyConfigBase):
     clean_rgb_sra_learning_rate: float | None = Field(default=None, gt=0.0)
     clean_rgb_sra_hidden_layer: int = Field(default=8, ge=0)
     clean_rgb_sra_hidden_dim: int | None = Field(default=None, gt=0)
+    clean_rgb_sra_num_layers: int = Field(default=5, ge=2)
     clean_rgb_sra_warmup_steps: int = Field(default=100, ge=0)
     clean_rgb_sra_beta: float = Field(default=0.05, gt=0.0)
 

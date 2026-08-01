@@ -141,6 +141,8 @@ training_strategy:
   clean_rgb_sra_learning_rate: null
   clean_rgb_sra_hidden_layer: 8
   clean_rgb_sra_hidden_dim: 1024
+  # Total number of Linear layers: input + residual blocks + output (minimum 2).
+  clean_rgb_sra_num_layers: 5
   clean_rgb_sra_warmup_steps: 100
   clean_rgb_sra_beta: 0.05
 

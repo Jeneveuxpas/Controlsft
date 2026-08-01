@@ -56,8 +56,10 @@ SRA head 位于 [`packages/ltx-trainer/src/ltx_trainer/sra.py`](packages/ltx-tra
 结构为逐 token 的：
 
 ```text
-LayerNorm → Linear → GELU → 3 × residual linear block → LayerNorm → Linear
+LayerNorm → Linear → GELU → K × residual linear block → LayerNorm → Linear
 ```
+
+其中 `K = clean_rgb_sra_num_layers - 2`，每个残差分支的可学习 scale 使用 `1 / sqrt(K)` 深度感知初始化。
 
 训练时在 transformer block `clean_rgb_sra_hidden_layer` 注册临时 forward hook，只截取 target 段 hidden：
 
@@ -74,6 +76,7 @@ LayerNorm → Linear → GELU → 3 × residual linear block → LayerNorm → L
 | `clean_rgb_sra_loss_weight` | `0.05` | warmup 完成后的 SRA loss 权重 |
 | `clean_rgb_sra_hidden_layer` | `8` | 捕获 block index 8（从 0 开始，即第 9 个 block）的输出 |
 | `clean_rgb_sra_hidden_dim` | `1024` | SRA projector hidden width |
+| `clean_rgb_sra_num_layers` | `5` | projector 的 Linear 总层数（最少 2）；中间残差块数为 `num_layers - 2` |
 | `clean_rgb_sra_warmup_steps` | `100` | loss 权重线性 warmup |
 | `clean_rgb_sra_beta` | `0.05` | SmoothL1 beta |
 | `clean_rgb_sra_learning_rate` | `null` | `null` 表示跟随主 optimizer LR |

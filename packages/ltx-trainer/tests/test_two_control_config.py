@@ -30,6 +30,7 @@ def test_two_control_example_declares_ordered_reference_sources() -> None:
     assert strategy.clean_rgb_sra_loss_weight == 0.05
     assert strategy.clean_rgb_sra_hidden_layer == 8
     assert strategy.clean_rgb_sra_hidden_dim == 1024
+    assert strategy.clean_rgb_sra_num_layers == 5
     assert strategy.get_data_sources() == {
         "conditions": "conditions",
         "latents": "video_latents",

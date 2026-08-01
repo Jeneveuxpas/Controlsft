@@ -1,4 +1,5 @@
 import torch
+import pytest
 
 from ltx_trainer.sra import CleanRGBSRAHead
 from ltx_trainer.training_strategies.base_strategy import ModelInputs
@@ -24,6 +25,25 @@ def test_clean_rgb_sra_head_projects_per_token() -> None:
     head = CleanRGBSRAHead(input_dim=32, hidden_dim=16, output_dim=8)
     output = head(torch.randn(2, 7, 32))
     assert output.shape == (2, 7, 8)
+
+
+def test_clean_rgb_sra_head_depth_and_learnable_residual_scaling() -> None:
+    for num_layers in (2, 3, 5, 8):
+        head = CleanRGBSRAHead(input_dim=32, hidden_dim=16, output_dim=8, num_layers=num_layers)
+        assert len(head.blocks) == num_layers - 2
+        assert sum(isinstance(module, torch.nn.Linear) for module in head.modules()) == num_layers
+        scale_params = [param for name, param in head.named_parameters() if name.endswith("residual_scale")]
+        assert len(scale_params) == len(head.blocks)
+        if head.blocks:
+            expected_scale = 1.0 / (len(head.blocks) ** 0.5)
+            assert all(
+                torch.isclose(block.residual_scale.detach(), torch.tensor(expected_scale)) for block in head.blocks
+            )
+
+
+def test_clean_rgb_sra_head_rejects_fewer_than_two_layers() -> None:
+    with pytest.raises(ValueError, match="at least 2"):
+        CleanRGBSRAHead(input_dim=32, hidden_dim=16, output_dim=8, num_layers=1)
 
 
 def test_clean_rgb_sra_uses_detached_clean_x0_and_warmup() -> None:
