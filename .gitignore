@@ -21,6 +21,7 @@ checkpoints/
 projects/
 tmp
 wandb/
+/datasets/
 
 # Model checkpoints
 *.ckpt

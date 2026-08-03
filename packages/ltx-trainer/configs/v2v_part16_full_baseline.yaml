@@ -64,7 +64,10 @@ acceleration:
   offload_optimizer_during_validation: true
 
 data:
-  preprocessed_data_root: "/path/to/preprocessed/part16_data"
+  # With manifest_path set, the loader reads only the selected records and does
+  # not scan or require latents/conditions/reference_latents directories here.
+  preprocessed_data_root: "/workspace"
+  manifest_path: "/workspace/code/controlsft_teacher/Controlsft/datasets/controlsft_teacher_250k/train.jsonl"
   num_dataloader_workers: 4
 
 validation:

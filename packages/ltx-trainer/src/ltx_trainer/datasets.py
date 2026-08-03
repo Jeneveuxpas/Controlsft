@@ -1,3 +1,4 @@
+import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -85,7 +86,12 @@ class DummyDataset(Dataset):
 
 
 class PrecomputedDataset(Dataset):
-    def __init__(self, data_root: str, data_sources: dict[str, str] | list[str] | None = None) -> None:
+    def __init__(
+        self,
+        data_root: str,
+        data_sources: dict[str, str] | list[str] | None = None,
+        manifest_path: str | None = None,
+    ) -> None:
         """
         Generic dataset for loading precomputed data from multiple sources.
         Args:
@@ -109,8 +115,11 @@ class PrecomputedDataset(Dataset):
 
         self.data_root = self._setup_data_root(data_root)
         self.data_sources = self._normalize_data_sources(data_sources)
-        self.source_paths = self._setup_source_paths()
-        self.sample_files = self._discover_samples()
+        self.manifest_path = Path(manifest_path).expanduser().resolve() if manifest_path else None
+        self.source_paths = self._setup_source_paths(validate=self.manifest_path is None)
+        self.sample_files = (
+            self._discover_manifest_samples() if self.manifest_path is not None else self._discover_samples()
+        )
         self._validate_setup()
 
     @staticmethod
@@ -141,7 +150,7 @@ class PrecomputedDataset(Dataset):
         else:
             raise TypeError(f"data_sources must be dict, list, or None, got {type(data_sources)}")
 
-    def _setup_source_paths(self) -> dict[str, Path]:
+    def _setup_source_paths(self, validate: bool = True) -> dict[str, Path]:
         """Map data source names to their actual directory paths."""
         source_paths = {}
 
@@ -150,10 +159,38 @@ class PrecomputedDataset(Dataset):
             source_paths[dir_name] = source_path
 
             # Check that all sources exist.
-            if not source_path.exists():
+            if validate and not source_path.exists():
                 raise FileNotFoundError(f"Required {dir_name} directory does not exist: {source_path}")
 
         return source_paths
+
+    def _discover_manifest_samples(self) -> dict[str, list[Path]]:
+        """Load explicitly selected samples from a JSONL manifest."""
+        if self.manifest_path is None:
+            raise ValueError("manifest_path is required")
+        if not self.manifest_path.is_file():
+            raise FileNotFoundError(f"Dataset manifest does not exist: {self.manifest_path}")
+
+        sample_files: dict[str, list[Path]] = {output_key: [] for output_key in self.data_sources.values()}
+        with self.manifest_path.open(encoding="utf-8") as manifest:
+            for line_number, line in enumerate(manifest, 1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"Invalid JSON on manifest line {line_number}: {exc}") from exc
+
+                for dir_name, output_key in self.data_sources.items():
+                    if dir_name not in record:
+                        raise ValueError(f"Manifest line {line_number} is missing required field '{dir_name}'")
+                    path = Path(record[dir_name]).expanduser()
+                    if not path.is_absolute():
+                        path = self.manifest_path.parent / path
+                    sample_files[output_key].append(path)
+
+        logger.info(f"Loaded {len(next(iter(sample_files.values()), [])):,} samples from {self.manifest_path}")
+        return sample_files
 
     def _discover_samples(self) -> dict[str, list[Path]]:
         """Discover all valid sample files across all data sources.

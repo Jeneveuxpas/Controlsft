@@ -414,6 +414,11 @@ class DataConfig(ConfigBaseModel):
         ge=0,
     )
 
+    manifest_path: str | None = Field(
+        default=None,
+        description="Optional JSONL manifest selecting explicit precomputed .pt files",
+    )
+
     @field_validator("preprocessed_data_root")
     @classmethod
     def validate_preprocessed_data_root(cls, v: str) -> str:
@@ -423,6 +428,16 @@ class DataConfig(ConfigBaseModel):
             raise ValueError(f"Dataset path does not exist: {v}")
         if not path.is_dir():
             raise ValueError(f"Dataset path is not a directory: {v}")
+        return str(path)
+
+    @field_validator("manifest_path")
+    @classmethod
+    def validate_manifest_path(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        path = Path(v).expanduser().resolve()
+        if not path.is_file():
+            raise ValueError(f"Dataset manifest does not exist: {v}")
         return str(path)
 
 
@@ -798,6 +813,8 @@ class LtxTrainerConfig(ConfigBaseModel):
 
     def _validate_data_dirs_exist(self) -> None:
         """Verify that every directory declared by the training strategy exists under the data root."""
+        if self.data.manifest_path is not None:
+            return
         data_root = Path(self.data.preprocessed_data_root)
         for dir_name in self.training_strategy.get_data_sources():
             dir_path = data_root / dir_name
