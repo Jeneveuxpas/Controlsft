@@ -417,12 +417,22 @@ class LtxvTrainer:
                 )
 
             hook_handle = block.register_forward_hook(_run_sra_head)
+        # Non-reentrant checkpointing normally stops recomputation as soon as
+        # the requested block tensors are available. With an SRA forward hook,
+        # that can skip the hook during backward and produce a different saved
+        # tensor count. Full recomputation keeps forward and backward identical.
+        checkpoint_context = (
+            torch.utils.checkpoint.set_checkpoint_early_stop(False)
+            if self._clean_rgb_sra_enabled() and self._config.optimization.enable_gradient_checkpointing
+            else contextlib.nullcontext()
+        )
         try:
-            video_pred, audio_pred = self._transformer(
-                video=model_inputs.video,
-                audio=model_inputs.audio,
-                perturbations=None,
-            )
+            with checkpoint_context:
+                video_pred, audio_pred = self._transformer(
+                    video=model_inputs.video,
+                    audio=model_inputs.audio,
+                    perturbations=None,
+                )
         finally:
             if hook_handle is not None:
                 hook_handle.remove()
