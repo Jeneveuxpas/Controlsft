@@ -14,8 +14,8 @@ training_strategy:
         latents_dir: "reference_latents"
         probability: 1.0
   clean_rgb_sra_checkpoint: null
-  clean_rgb_sra_loss_weight: 0.05
-  clean_rgb_sra_learning_rate: null
+  clean_rgb_sra_loss_weight: 0.1
+  clean_rgb_sra_learning_rate: 2.0e-5
   clean_rgb_sra_hidden_layer: 16
   clean_rgb_sra_hidden_dim: 1024
   clean_rgb_sra_num_layers: 8
@@ -29,7 +29,7 @@ optimization:
   gradient_accumulation_steps: 4
   max_grad_norm: 1.0
   optimizer_type: "adamw"
-  scheduler_type: "linear"
+  scheduler_type: "constant"
   scheduler_params: {}
   enable_gradient_checkpointing: true
 
