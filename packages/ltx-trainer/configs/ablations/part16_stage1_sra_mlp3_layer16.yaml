@@ -24,7 +24,7 @@ training_strategy:
 
 optimization:
   learning_rate: 4.0e-6
-  steps: 900
+  steps: 1000
   batch_size: 1
   gradient_accumulation_steps: 4
   max_grad_norm: 1.0
@@ -52,8 +52,8 @@ validation:
   skip_initial_validation: true
 
 checkpoints:
-  interval: 300
-  keep_last_n: 2
+  interval: 200
+  keep_last_n: 4
   precision: "bfloat16"
   save_training_state: "full"
   no_resume: true

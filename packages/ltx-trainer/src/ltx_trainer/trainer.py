@@ -631,7 +631,18 @@ class LtxvTrainer:
     def _load_full_checkpoint(self, checkpoint_path: Path) -> None:
         """Load full model checkpoint."""
         state_dict = load_file(checkpoint_path)
-        self._transformer.load_state_dict(state_dict, strict=True)
+        incompatible = self._transformer.load_state_dict(state_dict, strict=False)
+        missing = set(incompatible.missing_keys)
+        unexpected = set(incompatible.unexpected_keys)
+        allowed_missing = {name for name in missing if "clean_rgb_sra_head." in name}
+        invalid_missing = missing - allowed_missing
+        if invalid_missing or unexpected:
+            raise RuntimeError(
+                "Full checkpoint is incompatible with the model: "
+                f"missing={sorted(invalid_missing)}, unexpected={sorted(unexpected)}"
+            )
+        if allowed_missing:
+            logger.info("Initial checkpoint has no Clean RGB SRA head; using a newly initialized head")
 
         logger.info("✅ Full model checkpoint loaded successfully")
 
@@ -1205,6 +1216,12 @@ class LtxvTrainer:
                 if old_checkpoint.exists():
                     old_checkpoint.unlink()
                     logger.info(f"Removed old checkpoint: {old_checkpoint}")
+                match = re.search(r"step_(\d+)", old_checkpoint.name)
+                if match:
+                    sra_path = old_checkpoint.parent / f"clean_rgb_sra_head_step_{match.group(1)}.pt"
+                    if sra_path.exists():
+                        sra_path.unlink()
+                        logger.info(f"Removed old Clean RGB SRA head: {sra_path}")
             self._checkpoint_paths = self._checkpoint_paths[-self._config.checkpoints.keep_last_n :]
 
     def _save_training_state(self, save_dir: Path) -> None:
