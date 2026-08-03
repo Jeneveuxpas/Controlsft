@@ -31,6 +31,7 @@ Before diving into individual modes, here are the core ideas behind the flexible
 | **I2V**               | Generated | Generated | `first_frame`       | [`i2v_lora`](../configs/i2v_lora.yaml) |
 | **Video Extension**   | Generated | Generated | `prefix`/`suffix`   | [`video_extend_lora`](../configs/video_extend_lora.yaml) |
 | **V2V IC-LoRA**       | Generated | —         | `reference`         | [`v2v_ic_lora`](../configs/v2v_ic_lora.yaml) |
+| **Part16 V2V Full Baseline** | Generated | —  | `reference`         | [`v2v_part16_full_baseline`](../configs/v2v_part16_full_baseline.yaml) |
 | **A2V**               | Generated | Frozen    | —                   | [`a2v_lora`](../configs/a2v_lora.yaml) |
 | **V2A (Foley)**       | Frozen    | Generated | —                   | [`v2a_lora`](../configs/v2a_lora.yaml) |
 | **Video Inpainting**  | Generated | —         | `mask`              | [`video_inpainting_lora`](../configs/video_inpainting_lora.yaml) |
@@ -141,7 +142,8 @@ training_strategy:
 > applies first-frame conditioning with 20% probability alongside the reference.
 > Use [AV2AV IC-LoRA](#av2av-ic-lora) when both video and audio references should be trained jointly.
 
-**Example config:** 📄 [v2v_ic_lora.yaml](../configs/v2v_ic_lora.yaml)
+**Example configs:** 📄 [v2v_ic_lora.yaml](../configs/v2v_ic_lora.yaml) (LoRA),
+📄 [v2v_part16_full_baseline.yaml](../configs/v2v_part16_full_baseline.yaml) (Part16 full fine-tuning baseline)
 
 ### Dataset Requirements
 

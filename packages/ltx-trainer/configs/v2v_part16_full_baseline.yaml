@@ -1,0 +1,120 @@
+# =============================================================================
+# LTX-2.3 Part16 Control Baseline (Full Fine-Tuning, No SRA)
+# =============================================================================
+#
+# One-control baseline for the SRA ablation. The transformer receives:
+#
+#   [clean Part16 reference tokens | noisy RGB target tokens]
+#
+# Only the standard flow-matching objective is optimized. No SRA head or SRA
+# loss is created because clean_rgb_sra_loss_weight is explicitly set to 0.
+#
+# Expected preprocessed dataset layout:
+#   preprocessed_data_root/
+#   |-- latents/             # clean RGB target VAE latents
+#   |-- conditions/          # precomputed text features
+#   `-- reference_latents/   # Part16 control VAE latents
+#
+# Dataset metadata columns: video, reference_video, caption
+# =============================================================================
+
+model:
+  model_path: "/path/to/ltx-2.3-model.safetensors"
+  text_encoder_path: "/path/to/gemma-text-encoder"
+  training_mode: "full"
+  load_checkpoint: null
+
+# No `lora` block: every transformer parameter is trainable.
+
+training_strategy:
+  name: "flexible"
+  video:
+    is_generated: true
+    latents_dir: "latents"
+    conditions:
+      - type: reference
+        latents_dir: "reference_latents"
+        probability: 1.0
+
+  # Baseline switch: keep this at zero. The trainer will not construct the SRA head.
+  clean_rgb_sra_loss_weight: 0.0
+
+optimization:
+  # Conservative starting point for full-model fine-tuning. Keep identical in
+  # all later SRA ablations so the only changed variable is SRA.
+  learning_rate: 1.0e-5
+
+  # 250,000 samples / (4 machines * 8 GPUs * batch_size 1) ~= 7,813 steps.
+  steps: 7800
+  batch_size: 1
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  optimizer_type: "adamw"
+  scheduler_type: "linear"
+  scheduler_params: {}
+  enable_gradient_checkpointing: true
+
+acceleration:
+  mixed_precision_mode: "bf16"
+  quantization: null
+  load_text_encoder_in_8bit: false
+
+  # Validation loads the VAE decoder. Offloading the large full-finetune Adam
+  # state first leaves more H200 memory available for sampling.
+  offload_optimizer_during_validation: true
+
+data:
+  preprocessed_data_root: "/path/to/preprocessed/part16_data"
+  num_dataloader_workers: 4
+
+validation:
+  samples:
+    - prompt: "A person moves naturally while preserving the motion and structure provided by the Part16 control video."
+      conditions:
+        - type: reference
+          video: "/path/to/validation/part16_control.mp4"
+          downscale_factor: 1
+          temporal_scale_factor: 1
+          include_in_output: true
+
+  negative_prompt: "worst quality, inconsistent motion, blurry, jittery, distorted"
+  video_dims: [512, 512, 81]
+  frame_rate: 25.0
+  seed: 42
+  inference_steps: 30
+  interval: 1000
+  guidance_scale: 4.0
+  stg_scale: 1.0
+  stg_blocks: [29]
+  stg_mode: "stg_v"
+  generate_audio: false
+  generate_video: true
+  skip_initial_validation: true
+
+checkpoints:
+  interval: 1000
+  keep_last_n: 2
+  precision: "bfloat16"
+
+  # Exact full-model resume requires optimizer state and therefore substantial
+  # shared storage. Change to "off" if only weight checkpoints are needed.
+  save_training_state: "full"
+  no_resume: false
+
+flow_matching:
+  timestep_sampling_mode: "shifted_logit_normal"
+  timestep_sampling_params: {}
+
+hub:
+  push_to_hub: false
+  hub_model_id: null
+
+wandb:
+  enabled: false
+  project: "ltx-2.3-part16-control"
+  entity: null
+  tags: ["ltx-2.3", "part16", "full", "baseline", "no-sra"]
+  log_validation_videos: true
+
+seed: 42
+output_dir: "outputs/v2v_part16_full_baseline"

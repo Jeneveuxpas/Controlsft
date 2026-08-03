@@ -82,6 +82,7 @@ packages/ltx-trainer/
 │   ├── t2v_lora_low_vram.yaml    # Text-to-video LoRA (low VRAM)
 │   ├── i2v_lora.yaml             # Image-to-video LoRA
 │   ├── v2v_ic_lora.yaml          # IC-LoRA video-to-video
+│   ├── v2v_part16_full_baseline.yaml # Part16 full fine-tuning baseline without SRA
 │   ├── a2v_lora.yaml             # Audio-to-video LoRA
 │   ├── v2a_lora.yaml             # Video-to-audio LoRA
 │   ├── video_extend_lora.yaml    # Video extension (forward)
