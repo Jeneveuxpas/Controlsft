@@ -35,6 +35,7 @@ def test_clean_rgb_sra_head_depth_and_learnable_residual_scaling() -> None:
         assert sum(isinstance(module, torch.nn.Linear) for module in head.modules()) == num_layers
         scale_params = [param for name, param in head.named_parameters() if name.endswith("residual_scale")]
         assert len(scale_params) == len(head.blocks)
+        assert all(param.ndim == 1 and param.numel() == 1 for param in scale_params)
         if head.blocks:
             expected_scale = 1.0 / (len(head.blocks) ** 0.5)
             assert all(

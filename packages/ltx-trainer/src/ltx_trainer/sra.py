@@ -12,7 +12,9 @@ class _ResidualLayer(nn.Module):
         self.act = nn.GELU(approximate="tanh")
         # Depth-aware initialization stabilizes deeper heads while allowing
         # each residual block to learn its own contribution.
-        self.residual_scale = nn.Parameter(torch.tensor(residual_scale))
+        # FSDP v1 cannot manage scalar parameters. A single-element vector has
+        # identical broadcasting semantics while remaining shardable.
+        self.residual_scale = nn.Parameter(torch.tensor([residual_scale]))
 
     def forward(self, hidden_states: Tensor) -> Tensor:
         residual = self.proj(self.act(self.norm(hidden_states)))
