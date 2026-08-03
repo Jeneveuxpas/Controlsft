@@ -1,5 +1,6 @@
-import torch
 import pytest
+import torch
+from pydantic import ValidationError
 
 from ltx_trainer.sra import CleanRGBSRAHead
 from ltx_trainer.training_strategies.base_strategy import ModelInputs
@@ -44,6 +45,20 @@ def test_clean_rgb_sra_head_depth_and_learnable_residual_scaling() -> None:
 def test_clean_rgb_sra_head_rejects_fewer_than_two_layers() -> None:
     with pytest.raises(ValueError, match="at least 2"):
         CleanRGBSRAHead(input_dim=32, hidden_dim=16, output_dim=8, num_layers=1)
+
+
+def test_clean_rgb_sra_hidden_layer_is_one_based() -> None:
+    config = FlexibleStrategyConfig(
+        video=ModalityConfig(is_generated=True, latents_dir="latents"),
+        clean_rgb_sra_hidden_layer=1,
+    )
+    assert config.clean_rgb_sra_hidden_layer == 1
+
+    with pytest.raises(ValidationError, match="greater than or equal to 1"):
+        FlexibleStrategyConfig(
+            video=ModalityConfig(is_generated=True, latents_dir="latents"),
+            clean_rgb_sra_hidden_layer=0,
+        )
 
 
 def test_clean_rgb_sra_uses_detached_clean_x0_and_warmup() -> None:

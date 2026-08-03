@@ -172,7 +172,11 @@ class FlexibleStrategyConfig(TrainingStrategyConfigBase):
     clean_rgb_sra_checkpoint: str | None = Field(default=None)
     clean_rgb_sra_loss_weight: float = Field(default=0.0, ge=0.0)
     clean_rgb_sra_learning_rate: float | None = Field(default=None, gt=0.0)
-    clean_rgb_sra_hidden_layer: int = Field(default=8, ge=0)
+    clean_rgb_sra_hidden_layer: int = Field(
+        default=8,
+        ge=1,
+        description="One-based transformer block number whose video hidden states feed the clean RGB SRA head",
+    )
     clean_rgb_sra_hidden_dim: int | None = Field(default=None, gt=0)
     clean_rgb_sra_num_layers: int = Field(default=5, ge=2)
     clean_rgb_sra_warmup_steps: int = Field(default=100, ge=0)

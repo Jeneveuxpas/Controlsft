@@ -28,6 +28,7 @@ class TrainingState(BaseModel):
     rng_states: RngStates
     lr_scheduler_state_dict: dict[str, Any] | None = None
     optimizer_state_dict: dict[str, Any] | None = None
+    fsdp_optimizer_state_dir: str | None = None
     wandb_run_id: str | None = None
 
     def to_save_dict(self) -> dict[str, Any]:
@@ -49,5 +50,6 @@ class TrainingState(BaseModel):
             rng_states=RngStates(**data["rng_states"]),
             lr_scheduler_state_dict=data.get("lr_scheduler_state_dict"),
             optimizer_state_dict=data.get("optimizer_state_dict"),
+            fsdp_optimizer_state_dir=data.get("fsdp_optimizer_state_dir"),
             wandb_run_id=data.get("wandb_run_id"),
         )

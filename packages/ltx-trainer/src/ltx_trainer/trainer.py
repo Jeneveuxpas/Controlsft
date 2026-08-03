@@ -1,7 +1,9 @@
 import contextlib
+import json
 import math
 import os
 import re
+import shutil
 import time
 import warnings
 from collections.abc import Iterator
@@ -10,10 +12,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 import torch
-import wandb
 import yaml
 from accelerate import Accelerator, DistributedType
 from accelerate.utils import DistributedDataParallelKwargs, gather_object, set_seed
+from accelerate.utils.fsdp_utils import load_fsdp_optimizer, save_fsdp_optimizer
 from peft import LoraConfig, get_peft_model, get_peft_model_state_dict, set_peft_model_state_dict
 from peft.tuners.tuners_utils import BaseTunerLayer
 from peft.utils import ModulesToSaveWrapper
@@ -31,6 +33,7 @@ from torch.optim.lr_scheduler import (
 )
 from torch.utils.data import DataLoader
 
+import wandb
 from ltx_core.text_encoders.gemma import convert_to_additive_mask
 from ltx_trainer import logger
 from ltx_trainer.config import LtxTrainerConfig
@@ -57,7 +60,9 @@ warnings.filterwarnings(
 )
 
 # Disable progress bars if not main process
-IS_MAIN_PROCESS = os.environ.get("LOCAL_RANK", "0") == "0"
+# LOCAL_RANK is zero once per machine. RANK is the global rank and is therefore
+# the correct guard for shared filesystem writes in multi-node jobs.
+IS_MAIN_PROCESS = os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")) == "0"
 if not IS_MAIN_PROCESS:
     from transformers.utils.logging import disable_progress_bar
 
@@ -114,6 +119,7 @@ class LtxvTrainer:
         self._prepare_models_for_training()
         self._dataset = None
         self._global_step = -1
+        self._last_saved_step: int | None = None
         self._checkpoint_paths: list[Path] = []
         self._training_state_paths: list[Path] = []
         self._training_state_size_warned = False
@@ -316,7 +322,12 @@ class LtxvTrainer:
         total_time_seconds = train_end_time - train_start_time
         steps_per_second = remaining_steps / total_time_seconds
 
-        samples_per_second = steps_per_second * self._accelerator.num_processes * cfg.optimization.batch_size
+        global_batch_size = (
+            cfg.optimization.batch_size
+            * self._accelerator.num_processes
+            * cfg.optimization.gradient_accumulation_steps
+        )
+        samples_per_second = steps_per_second * global_batch_size
 
         stats = TrainingStats(
             total_time_seconds=total_time_seconds,
@@ -324,7 +335,7 @@ class LtxvTrainer:
             samples_per_second=samples_per_second,
             peak_gpu_memory_gb=peak_mem,
             num_processes=self._accelerator.num_processes,
-            global_batch_size=cfg.optimization.batch_size * self._accelerator.num_processes,
+            global_batch_size=global_batch_size,
         )
 
         saved_path = self._save_checkpoint()
@@ -453,7 +464,11 @@ class LtxvTrainer:
         )
         self._embeddings_processor.feature_extractor = None
 
-        transformer_dtype = torch.bfloat16 if self._config.model.training_mode == "lora" else torch.float32
+        use_bf16 = (
+            self._config.model.training_mode == "lora"
+            or self._config.acceleration.mixed_precision_mode == "bf16"
+        )
+        transformer_dtype = torch.bfloat16 if use_bf16 else torch.float32
         self._transformer = self._transformer.to(dtype=transformer_dtype)
 
         if self._config.acceleration.quantization is not None:
@@ -474,13 +489,24 @@ class LtxvTrainer:
             # For LoRA training, first set up LoRA layers
             self._setup_lora()
         elif self._config.model.training_mode == "full":
-            # For full training, unfreeze all transformer parameters
             self._transformer.requires_grad_(True)
+            if getattr(self._config.training_strategy, "audio", None) is None:
+                frozen = 0
+                for name, param in self._transformer.named_parameters():
+                    if self._is_audio_or_av_parameter(name):
+                        param.requires_grad_(False)
+                        frozen += param.numel()
+                logger.info(f"Video-only full training: froze {frozen:,} audio/AV parameters")
         else:
             raise ValueError(f"Unknown training mode: {self._config.model.training_mode}")
 
         self._trainable_params = [p for p in self._transformer.parameters() if p.requires_grad]
         logger.debug(f"Trainable params count: {sum(p.numel() for p in self._trainable_params):,}")
+
+    @staticmethod
+    def _is_audio_or_av_parameter(name: str) -> bool:
+        """Identify parameters unused when the audio modality is disabled."""
+        return any(token in name for token in ("audio", "a2v", "v2a"))
 
     def _clean_rgb_sra_enabled(self) -> bool:
         return bool(getattr(self._config.training_strategy, "clean_rgb_sra_loss_weight", 0.0) > 0.0)
@@ -513,21 +539,23 @@ class LtxvTrainer:
 
     def _clean_rgb_sra_block(self) -> torch.nn.Module:
         blocks = self._find_model_attr(self._transformer, "transformer_blocks")
-        layer = int(self._config.training_strategy.clean_rgb_sra_hidden_layer)
-        if blocks is None or not 0 <= layer < len(blocks):
+        layer_number = int(self._config.training_strategy.clean_rgb_sra_hidden_layer)
+        layer_index = layer_number - 1
+        if blocks is None or not 0 <= layer_index < len(blocks):
             count = 0 if blocks is None else len(blocks)
-            raise ValueError(f"clean_rgb_sra_hidden_layer {layer} is outside 0..{count - 1}")
-        return blocks[layer]
+            raise ValueError(f"clean_rgb_sra_hidden_layer {layer_number} is outside 1..{count}")
+        return blocks[layer_index]
 
     def _setup_clean_rgb_sra_head(self) -> None:
         if not self._clean_rgb_sra_enabled():
             return
         base = self._transformer.get_base_model() if hasattr(self._transformer, "get_base_model") else self._transformer
         blocks = getattr(base, "transformer_blocks", None)
-        layer = int(self._config.training_strategy.clean_rgb_sra_hidden_layer)
-        if blocks is None or not 0 <= layer < len(blocks):
+        layer_number = int(self._config.training_strategy.clean_rgb_sra_hidden_layer)
+        layer_index = layer_number - 1
+        if blocks is None or not 0 <= layer_index < len(blocks):
             count = 0 if blocks is None else len(blocks)
-            raise ValueError(f"clean_rgb_sra_hidden_layer {layer} is outside 0..{count - 1}")
+            raise ValueError(f"clean_rgb_sra_hidden_layer {layer_number} is outside 1..{count}")
         input_dim = int(base.inner_dim)
         output_dim = int(base.proj_out.out_features)
         hidden_dim = self._config.training_strategy.clean_rgb_sra_hidden_dim or max(512, input_dim // 4)
@@ -543,7 +571,8 @@ class LtxvTrainer:
         head.requires_grad_(True)
         self._trainable_params.extend(head.parameters())
         logger.info(
-            f"Enabled Clean RGB SRA: layer={layer}, hidden_dim={hidden_dim}, projector_layers={num_layers}, "
+            f"Enabled Clean RGB SRA: layer={layer_number} (1-based), hidden_dim={hidden_dim}, "
+            f"projector_layers={num_layers}, "
             f"weight={self._config.training_strategy.clean_rgb_sra_loss_weight}"
         )
 
@@ -689,7 +718,21 @@ class LtxvTrainer:
         Returns True if restore succeeded, False if it failed (caller should fall back to step 0).
         """
         try:
-            if training_state.optimizer_state_dict is not None:
+            if training_state.fsdp_optimizer_state_dir is not None:
+                if self._accelerator.distributed_type != DistributedType.FSDP:
+                    raise ValueError("FSDP optimizer state requires an FSDP launch")
+                state_dir = self._loaded_checkpoint_path.parent / training_state.fsdp_optimizer_state_dir
+                if not (state_dir / ".complete").is_file():
+                    raise FileNotFoundError(f"Incomplete FSDP optimizer checkpoint: {state_dir}")
+                load_fsdp_optimizer(
+                    self._accelerator.state.fsdp_plugin,
+                    self._accelerator,
+                    self._optimizer,
+                    self._transformer,
+                    str(state_dir),
+                )
+                logger.info(f"📥 Restored sharded FSDP optimizer state from {state_dir}")
+            elif training_state.optimizer_state_dict is not None:
                 self._optimizer.load_state_dict(training_state.optimizer_state_dict)
                 logger.debug("Restored optimizer state (full mode)")
 
@@ -701,8 +744,24 @@ class LtxvTrainer:
             return False
 
         rng = training_state.rng_states
-        if self._accelerator.num_processes > 1:
-            logger.debug("Skipping RNG restore in multi-process mode (only main process state was saved)")
+        fsdp_state_dir = (
+            self._loaded_checkpoint_path.parent / training_state.fsdp_optimizer_state_dir
+            if training_state.fsdp_optimizer_state_dir is not None
+            else None
+        )
+        rank_rng_path = (
+            fsdp_state_dir / f"random_states_{self._accelerator.process_index}.pkl"
+            if fsdp_state_dir is not None
+            else None
+        )
+        if rank_rng_path is not None and rank_rng_path.is_file():
+            rank_rng = torch.load(rank_rng_path, map_location="cpu", weights_only=True)
+            torch.random.set_rng_state(rank_rng["torch_state"])
+            if rank_rng.get("cuda_state") is not None and torch.cuda.is_available():
+                torch.cuda.set_rng_state(rank_rng["cuda_state"])
+            logger.debug(f"Restored RNG state for rank {self._accelerator.process_index}")
+        elif self._accelerator.num_processes > 1:
+            logger.debug("Skipping RNG restore in multi-process mode (per-rank state not found)")
         else:
             if rng.torch_state is not None:
                 torch.random.set_rng_state(rng.torch_state)
@@ -906,8 +965,12 @@ class LtxvTrainer:
             )
 
             local_batch = self._config.optimization.batch_size
-            global_batch = self._config.optimization.batch_size * self._accelerator.num_processes
-            logger.info(f"Local batch size: {local_batch}, global batch size: {global_batch}")
+            accumulation = self._config.optimization.gradient_accumulation_steps
+            global_batch = local_batch * self._accelerator.num_processes * accumulation
+            logger.info(
+                f"Local batch size: {local_batch}, gradient accumulation: {accumulation}, "
+                f"effective global batch size: {global_batch}"
+            )
 
         # Log torch.compile status from Accelerate's dynamo plugin
         is_compile_enabled = (
@@ -1053,55 +1116,66 @@ class LtxvTrainer:
         filename = f"{prefix}_weights_step_{self._global_step:05d}.safetensors"
         saved_weights_path = save_dir / filename
 
+        # The interval checkpoint can coincide with the final step. Avoid entering
+        # expensive FSDP collectives and rewriting the same checkpoint twice.
+        if self._last_saved_step == self._global_step:
+            if IS_MAIN_PROCESS:
+                logger.debug(f"Checkpoint for step {self._global_step} already saved; skipping duplicate final save")
+            return saved_weights_path if IS_MAIN_PROCESS else None
+
         # Get state dict (collective operation - all processes must participate)
         self._accelerator.wait_for_everyone()
         full_state_dict = self._accelerator.get_state_dict(self._transformer)
 
-        if not IS_MAIN_PROCESS:
-            return None
+        if IS_MAIN_PROCESS:
+            save_dir.mkdir(exist_ok=True, parents=True)
 
-        save_dir.mkdir(exist_ok=True, parents=True)
+            # Determine save precision
+            save_dtype = torch.bfloat16 if self._config.checkpoints.precision == "bfloat16" else torch.float32
 
-        # Determine save precision
-        save_dtype = torch.bfloat16 if self._config.checkpoints.precision == "bfloat16" else torch.float32
+            # For LoRA: extract only adapter weights; for full: use as-is
+            if is_lora:
+                unwrapped = self._accelerator.unwrap_model(self._transformer, keep_torch_compile=False)
+                # For FSDP, pass full_state_dict since model params aren't directly accessible
+                state_dict = get_peft_model_state_dict(unwrapped, state_dict=full_state_dict if is_fsdp else None)
 
-        # For LoRA: extract only adapter weights; for full: use as-is
-        if is_lora:
-            unwrapped = self._accelerator.unwrap_model(self._transformer, keep_torch_compile=False)
-            # For FSDP, pass full_state_dict since model params aren't directly accessible
-            state_dict = get_peft_model_state_dict(unwrapped, state_dict=full_state_dict if is_fsdp else None)
+                # Remove "base_model.model." prefix added by PEFT
+                state_dict = {k.replace("base_model.model.", "", 1): v for k, v in state_dict.items()}
 
-            # Remove "base_model.model." prefix added by PEFT
-            state_dict = {k.replace("base_model.model.", "", 1): v for k, v in state_dict.items()}
+                # Convert to ComfyUI-compatible format (add "diffusion_model." prefix)
+                state_dict = {f"diffusion_model.{k}": v for k, v in state_dict.items()}
 
-            # Convert to ComfyUI-compatible format (add "diffusion_model." prefix)
-            state_dict = {f"diffusion_model.{k}": v for k, v in state_dict.items()}
+                # Cast to configured precision
+                state_dict = {k: v.to(save_dtype) if isinstance(v, Tensor) else v for k, v in state_dict.items()}
 
-            # Cast to configured precision
-            state_dict = {k: v.to(save_dtype) if isinstance(v, Tensor) else v for k, v in state_dict.items()}
+                # Build metadata for safetensors file
+                metadata = self._build_checkpoint_metadata()
 
-            # Build metadata for safetensors file
-            metadata = self._build_checkpoint_metadata()
+                # Save to disk with metadata
+                save_file(state_dict, saved_weights_path, metadata=metadata)
+            else:
+                # Cast to configured precision
+                full_state_dict = {
+                    k: v.to(save_dtype).contiguous() if isinstance(v, Tensor) else v for k, v in full_state_dict.items()
+                }
 
-            # Save to disk with metadata
-            save_file(state_dict, saved_weights_path, metadata=metadata)
-        else:
-            # Cast to configured precision
-            full_state_dict = {k: v.to(save_dtype) if isinstance(v, Tensor) else v for k, v in full_state_dict.items()}
+                # The extension and serialization format must agree because resume uses safetensors.load_file().
+                save_file(full_state_dict, saved_weights_path)
 
-            # Save to disk
-            self._accelerator.save(full_state_dict, saved_weights_path)
+            rel_path = saved_weights_path.relative_to(self._config.output_dir)
+            logger.info(f"💾 {prefix.capitalize()} weights for step {self._global_step} saved in {rel_path}")
 
-        rel_path = saved_weights_path.relative_to(self._config.output_dir)
-        logger.info(f"💾 {prefix.capitalize()} weights for step {self._global_step} saved in {rel_path}")
+            self._checkpoint_paths.append(saved_weights_path)
+            self._cleanup_checkpoints()
+            self._save_clean_rgb_sra_head(save_dir)
 
-        self._checkpoint_paths.append(saved_weights_path)
-        self._cleanup_checkpoints()
-
-        self._save_clean_rgb_sra_head(save_dir)
+        # FSDP optimizer checkpointing is collective, so every rank must enter.
+        self._accelerator.wait_for_everyone()
         self._save_training_state(save_dir)
+        self._accelerator.wait_for_everyone()
+        self._last_saved_step = self._global_step
 
-        return saved_weights_path
+        return saved_weights_path if IS_MAIN_PROCESS else None
 
     def _save_clean_rgb_sra_head(self, save_dir: Path) -> None:
         if not self._clean_rgb_sra_enabled():
@@ -1140,9 +1214,6 @@ class LtxvTrainer:
         - "minimal": scheduler + RNG + step only
         - "off": skip entirely
         """
-        if not IS_MAIN_PROCESS:
-            return
-
         mode = self._config.checkpoints.save_training_state
         if mode == "off":
             return
@@ -1150,14 +1221,15 @@ class LtxvTrainer:
         is_fsdp = self._accelerator.distributed_type == DistributedType.FSDP
 
         optimizer_state = None
+        fsdp_optimizer_state_dir = None
         if mode == "full":
             if is_fsdp:
-                logger.warning(
-                    "⚠️ save_training_state='full' is not supported with FSDP. "
-                    "Saving 'minimal' state (scheduler + RNG only)."
-                )
+                fsdp_optimizer_state_dir = self._save_fsdp_optimizer_state(save_dir)
             else:
                 optimizer_state = self._optimizer.state_dict()
+
+        if not IS_MAIN_PROCESS:
+            return
 
         state = TrainingState(
             global_step=self._global_step,
@@ -1173,6 +1245,7 @@ class LtxvTrainer:
             ),
             lr_scheduler_state_dict=self._lr_scheduler.state_dict() if self._lr_scheduler is not None else None,
             optimizer_state_dict=optimizer_state,
+            fsdp_optimizer_state_dir=fsdp_optimizer_state_dir.name if fsdp_optimizer_state_dir is not None else None,
             wandb_run_id=self._wandb_run.id if self._wandb_run is not None else None,
         )
 
@@ -1202,6 +1275,50 @@ class LtxvTrainer:
         rel_path = state_path.relative_to(self._config.output_dir)
         logger.debug(f"Training state saved to {rel_path}")
 
+    def _save_fsdp_optimizer_state(self, save_dir: Path) -> Path:
+        """Collectively save sharded FP32 optimizer state and per-rank RNG state."""
+        state_dir = save_dir / f"distributed_state_step_{self._global_step:05d}"
+        if IS_MAIN_PROCESS:
+            state_dir.mkdir(exist_ok=False, parents=True)
+        self._accelerator.wait_for_everyone()
+
+        save_fsdp_optimizer(
+            self._accelerator.state.fsdp_plugin,
+            self._accelerator,
+            self._optimizer,
+            self._transformer,
+            str(state_dir),
+        )
+
+        rng_path = state_dir / f"random_states_{self._accelerator.process_index}.pkl"
+        torch.save(
+            {
+                "torch_state": torch.random.get_rng_state(),
+                "cuda_state": torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
+            },
+            rng_path,
+        )
+        self._accelerator.wait_for_everyone()
+
+        if IS_MAIN_PROCESS:
+            scheduler_state = self._lr_scheduler.state_dict() if self._lr_scheduler is not None else None
+            if scheduler_state is not None:
+                torch.save(scheduler_state, state_dir / "scheduler.bin")
+            (state_dir / "trainer_state.json").write_text(
+                json.dumps(
+                    {
+                        "global_step": self._global_step,
+                        "micro_step": self._global_step * self._config.optimization.gradient_accumulation_steps,
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+            (state_dir / ".complete").write_text("ok\n")
+            logger.info(f"💾 Sharded FSDP optimizer state saved in {state_dir}")
+        self._accelerator.wait_for_everyone()
+        return state_dir
+
     def _cleanup_training_states(self) -> None:
         """Clean up old training state files, using the same keep_last_n as checkpoints."""
         keep_n = self._config.checkpoints.keep_last_n
@@ -1211,6 +1328,12 @@ class LtxvTrainer:
                 if old_state.exists():
                     old_state.unlink()
                     logger.debug(f"Removed old training state: {old_state}")
+                match = re.search(r"step_(\d+)", old_state.name)
+                if match:
+                    fsdp_state_dir = old_state.parent / f"distributed_state_step_{match.group(1)}"
+                    if fsdp_state_dir.exists():
+                        shutil.rmtree(fsdp_state_dir)
+                        logger.debug(f"Removed old distributed training state: {fsdp_state_dir}")
             self._training_state_paths = self._training_state_paths[-keep_n:]
 
     def _build_checkpoint_metadata(self) -> dict[str, str]:
