@@ -417,22 +417,12 @@ class LtxvTrainer:
                 )
 
             hook_handle = block.register_forward_hook(_run_sra_head)
-        # Non-reentrant checkpointing normally stops recomputation as soon as
-        # the requested block tensors are available. With an SRA forward hook,
-        # that can skip the hook during backward and produce a different saved
-        # tensor count. Full recomputation keeps forward and backward identical.
-        checkpoint_context = (
-            torch.utils.checkpoint.set_checkpoint_early_stop(False)
-            if self._clean_rgb_sra_enabled() and self._config.optimization.enable_gradient_checkpointing
-            else contextlib.nullcontext()
-        )
         try:
-            with checkpoint_context:
-                video_pred, audio_pred = self._transformer(
-                    video=model_inputs.video,
-                    audio=model_inputs.audio,
-                    perturbations=None,
-                )
+            video_pred, audio_pred = self._transformer(
+                video=model_inputs.video,
+                audio=model_inputs.audio,
+                perturbations=None,
+            )
         finally:
             if hook_handle is not None:
                 hook_handle.remove()
@@ -814,7 +804,17 @@ class LtxvTrainer:
             self._transformer.get_base_model() if hasattr(self._transformer, "get_base_model") else self._transformer
         )
 
-        transformer.set_gradient_checkpointing(self._config.optimization.enable_gradient_checkpointing)
+        checkpoint_skip_blocks = None
+        if self._clean_rgb_sra_enabled():
+            checkpoint_skip_blocks = {int(self._config.training_strategy.clean_rgb_sra_hidden_layer) - 1}
+            logger.info(
+                "Clean RGB SRA: retaining activations for transformer block "
+                f"{self._config.training_strategy.clean_rgb_sra_hidden_layer} (1-based)"
+            )
+        transformer.set_gradient_checkpointing(
+            self._config.optimization.enable_gradient_checkpointing,
+            skip_blocks=checkpoint_skip_blocks,
+        )
 
         # noinspection PyTypeChecker
         self._transformer = self._accelerator.prepare(self._transformer)

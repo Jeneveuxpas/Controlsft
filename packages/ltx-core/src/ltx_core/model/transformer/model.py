@@ -85,6 +85,7 @@ class LTXModel(torch.nn.Module):
             attention_label(ops.attention_ops.masked_attention_function),
         )
         self._enable_gradient_checkpointing = False
+        self._gradient_checkpointing_skip_blocks: set[int] = set()
         self.cross_attention_adaln = cross_attention_adaln
         self.use_middle_indices_grid = use_middle_indices_grid
         self.rope_type = rope_type
@@ -348,15 +349,17 @@ class LTXModel(torch.nn.Module):
             ]
         )
 
-    def set_gradient_checkpointing(self, enable: bool) -> None:
+    def set_gradient_checkpointing(self, enable: bool, skip_blocks: set[int] | None = None) -> None:
         """Enable or disable gradient checkpointing for transformer blocks.
         Gradient checkpointing trades compute for memory by recomputing activations
         during the backward pass instead of storing them. This can significantly
         reduce memory usage at the cost of ~20-30% slower training.
         Args:
             enable: Whether to enable gradient checkpointing
+            skip_blocks: Zero-based block indices that must retain activations
         """
         self._enable_gradient_checkpointing = enable
+        self._gradient_checkpointing_skip_blocks = set(skip_blocks or ())
 
     @property
     def num_blocks(self) -> int:
@@ -388,7 +391,11 @@ class LTXModel(torch.nn.Module):
                     cross_attn_type=PerturbationType.SKIP_V2A_CROSS_ATTN,
                 )
 
-            if self._enable_gradient_checkpointing and self.training:
+            if (
+                self._enable_gradient_checkpointing
+                and self.training
+                and block_idx not in self._gradient_checkpointing_skip_blocks
+            ):
                 video, audio = torch.utils.checkpoint.checkpoint(
                     block,
                     video,
