@@ -66,6 +66,7 @@ We include ready-to-use Accelerate config files in `configs/accelerate/`:
 - [ddp.yaml](../configs/accelerate/ddp.yaml) — Standard DDP
 - [ddp_compile.yaml](../configs/accelerate/ddp_compile.yaml) — DDP with `torch.compile` (Inductor)
 - [fsdp.yaml](../configs/accelerate/fsdp.yaml) — Standard FSDP (auto-wraps `BasicAVTransformerBlock`)
+- [fsdp_4node_32gpu.yaml](../configs/accelerate/fsdp_4node_32gpu.yaml) — Four nodes, eight GPUs per node
 - [fsdp_compile.yaml](../configs/accelerate/fsdp_compile.yaml) — FSDP with `torch.compile` (Inductor)
 
 Launch with a specific config using `--config_file`:
@@ -98,6 +99,21 @@ uv run accelerate launch --config_file configs/accelerate/fsdp_compile.yaml \
   restrict GPUs with `CUDA_VISIBLE_DEVICES`.
 - The compile variants enable `torch.compile` with the Inductor backend via Accelerate's `dynamo_config`.
 - FSDP configs auto-wrap the transformer blocks (`fsdp_transformer_layer_cls_to_wrap: BasicAVTransformerBlock`).
+
+### Four-node managed jobs
+
+When all four containers share the repository parent directory, use the rendezvous helper with a unique run ID and
+an absolute training config path:
+
+```bash
+/workspace/code/controlsft_teacher/Controlsft/packages/ltx-trainer/scripts/launch_4node_fsdp.sh \
+  stage1-baseline-001 \
+  /workspace/code/controlsft_teacher/Controlsft/packages/ltx-trainer/configs/ablations/part16_stage1_baseline.yaml
+```
+
+The helper atomically assigns machine ranks through the shared filesystem, publishes rank 0's address, honors the
+platform-provided `MASTER_PORT` (default `2345`), and launches 32 total processes. Use a different run ID for every
+experiment. `WANDB_API_KEY` should be supplied as a secret environment variable rather than stored in YAML.
 
 ### Launch with Your Default Accelerate Config
 

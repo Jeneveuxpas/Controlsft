@@ -32,6 +32,7 @@ Before diving into individual modes, here are the core ideas behind the flexible
 | **Video Extension**   | Generated | Generated | `prefix`/`suffix`   | [`video_extend_lora`](../configs/video_extend_lora.yaml) |
 | **V2V IC-LoRA**       | Generated | —         | `reference`         | [`v2v_ic_lora`](../configs/v2v_ic_lora.yaml) |
 | **Part16 V2V Full Baseline** | Generated | —  | `reference`         | [`v2v_part16_full_baseline`](../configs/v2v_part16_full_baseline.yaml) |
+| **Part16 Stage-1 SRA Ablation** | Generated | — | `reference` | [`baseline`](../configs/ablations/part16_stage1_baseline.yaml), [`MLP-3`](../configs/ablations/part16_stage1_sra_mlp3_layer16.yaml), [`MLP-5`](../configs/ablations/part16_stage1_sra_mlp5_layer16.yaml), [`MLP-8`](../configs/ablations/part16_stage1_sra_mlp8_layer16.yaml) |
 | **A2V**               | Generated | Frozen    | —                   | [`a2v_lora`](../configs/a2v_lora.yaml) |
 | **V2A (Foley)**       | Frozen    | Generated | —                   | [`v2a_lora`](../configs/v2a_lora.yaml) |
 | **Video Inpainting**  | Generated | —         | `mask`              | [`video_inpainting_lora`](../configs/video_inpainting_lora.yaml) |
@@ -144,6 +145,10 @@ training_strategy:
 
 **Example configs:** 📄 [v2v_ic_lora.yaml](../configs/v2v_ic_lora.yaml) (LoRA),
 📄 [v2v_part16_full_baseline.yaml](../configs/v2v_part16_full_baseline.yaml) (Part16 full fine-tuning baseline)
+
+The matched Part16 stage-1 configs in [`configs/ablations`](../configs/ablations) compare no-SRA baseline against
+3-, 5-, and 8-linear-layer SRA projectors. All SRA variants align the 1-based transformer layer 16 and keep the
+dataset, seed, optimizer, learning-rate schedule, and effective global batch size fixed.
 
 ### Dataset Requirements
 

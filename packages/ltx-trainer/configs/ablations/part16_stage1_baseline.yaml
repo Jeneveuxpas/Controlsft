@@ -1,0 +1,70 @@
+model:
+  model_path: "/workspace/code/controlsft_teacher/checkpoints/ltx-2.3/ltx-2.3-22b-dev.safetensors"
+  text_encoder_path: null
+  training_mode: "full"
+  load_checkpoint: "/workspace/code/controlsft_teacher/checkpoints/merged/model_weights_step_40000_fp32.safetensors"
+
+training_strategy:
+  name: "flexible"
+  video:
+    is_generated: true
+    latents_dir: "latents"
+    conditions:
+      - type: reference
+        latents_dir: "reference_latents"
+        probability: 1.0
+  clean_rgb_sra_loss_weight: 0.0
+
+optimization:
+  learning_rate: 4.0e-6
+  steps: 900
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  max_grad_norm: 1.0
+  optimizer_type: "adamw"
+  scheduler_type: "linear"
+  scheduler_params: {}
+  enable_gradient_checkpointing: true
+
+acceleration:
+  mixed_precision_mode: "bf16"
+  quantization: null
+  load_text_encoder_in_8bit: false
+  offload_optimizer_during_validation: false
+
+data:
+  preprocessed_data_root: "/workspace"
+  manifest_path: "/workspace/code/controlsft_teacher/Controlsft/datasets/controlsft_teacher_250k/train.jsonl"
+  num_dataloader_workers: 2
+
+validation:
+  samples: []
+  interval: null
+  generate_audio: false
+  generate_video: false
+  skip_initial_validation: true
+
+checkpoints:
+  interval: 300
+  keep_last_n: 2
+  precision: "bfloat16"
+  save_training_state: "full"
+  no_resume: true
+
+flow_matching:
+  timestep_sampling_mode: "shifted_logit_normal"
+  timestep_sampling_params: {}
+
+hub:
+  push_to_hub: false
+  hub_model_id: null
+
+wandb:
+  enabled: true
+  project: "ltx-2.3-part16-control"
+  entity: null
+  tags: ["ablation-stage1", "baseline", "fsdp", "4node", "gbs128"]
+  log_validation_videos: false
+
+seed: 42
+output_dir: "/workspace/code/controlsft_teacher/outputs/ablation_stage1_baseline"
