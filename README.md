@@ -1,140 +1,153 @@
 # Controlsft
 
 > [!IMPORTANT]
-> 本仓库的 `main` 分支是基于官方 LTX-2 的 Controlsft 研究分支，当前只增加：
-> **两个有序视频控制条件（Part16 + Depth）**和 **Clean RGB SRA 辅助监督**。
-> 官方基线为 [`Lightricks/LTX-2@9377758`](https://github.com/Lightricks/LTX-2/tree/9377758131b1ffde4b7f766804590a6617bf2ab9)。
+> 本仓库的 `main` 分支基于官方 LTX-2，目前用于研究视频 reference 控制和
+> Clean RGB SRA 辅助监督。当前 Stage-1 消融使用**单个 Part16 控制 + 全量微调**，
+> 代码同时保留 `Part16 + Depth` 两个有序 reference 的能力。
+>
+> 官方基线：[`Lightricks/LTX-2@9377758`](https://github.com/Lightricks/LTX-2/tree/9377758131b1ffde4b7f766804590a6617bf2ab9)
 
-## Controlsft：相比官方代码修改了什么
-
-### 1. 目标与明确边界
-
-当前实现研究的是两个控制视频共同约束 RGB 视频生成：
+## 当前训练流程
 
 ```text
-Part16 control ─┐
-                ├─ VAE tokens ── [Part16 | Depth | noisy RGB target] ── LTX-2
-Depth control ──┘                                      │
-                                                      ├─ official flow-matching loss
-clean RGB target ── VAE x0 ───────────────────────────└─ Clean RGB SRA loss
+Part16 control ── VAE tokens ── [Part16 clean tokens | noisy RGB target tokens] ── LTX-2.3
+                                                                                 │
+                                                  ├─ official flow-matching loss
+clean RGB target ── VAE x0 ────────────────────────────────────────────────└─ Clean RGB SRA loss
 ```
 
-- Part16 和 Depth 只作为 clean reference token：`timestep=0`，不加噪，不计算生成 loss。
+- Part16 是 clean reference token：`timestep=0`，不加噪，不计算生成 loss。
 - RGB target 使用官方 flow-matching 训练目标。
-- Clean RGB SRA 从指定 transformer 中间层的 **RGB target token** 预测 detached clean RGB VAE latent `x0`。
+- SRA 从指定 transformer 中间层的 RGB target token 预测 detached clean RGB VAE latent `x0`。
 - 总 loss 为 `L_total = L_official_flow + λ(step) * L_clean_rgb_sra`。
-- 没有加入 foreground loss、Part16/Depth 重建 loss、XYZ loss、蒸馏 loss或其他辅助 loss。
-- `packages/ltx-core`、`packages/ltx-pipelines`、官方 transformer 主体和 VAE 均未修改。
+- 当前消融配置使用 `training_mode: full`，不是 LoRA。
+- 没有加入 foreground、Part16/Depth 重建、XYZ、蒸馏或其他辅助 loss。
 
-### 2. 两个控制条件的数据与 token 顺序
+## 数据与 token 顺序
 
-每条数据必须是一一对应的四列：
+当前单 Part16 数据使用：
 
 | Dataset column | 含义 | 预处理输出 |
 | --- | --- | --- |
 | `video` | RGB target | `latents/` |
-| `reference_video` | 第一个控制，当前约定为 Part16 | `reference_latents/` |
-| `reference_video_1` | 第二个控制，当前约定为 Depth | `reference_latents_1/` |
+| `reference_video` | Part16 control | `reference_latents/` |
 | `caption` | 文本条件 | `conditions/` |
 
-最终训练和验证的 token 布局都固定为：
+单控制 token 布局：
+
+```text
+[reference_latents (Part16) | RGB target]
+```
+
+如果增加 `reference_video_1`（当前约定为 Depth），它会被预处理到
+`reference_latents_1/`，token 顺序为：
 
 ```text
 [reference_latents (Part16) | reference_latents_1 (Depth) | RGB target]
 ```
 
-官方 flexible strategy 每次都会把 reference prepend 到序列前面，因此按配置正序应用两个
-reference 会意外得到反序。本分支按配置的逆序执行 prepend，使最终 token 顺序仍与 YAML
-声明顺序一致。验证器也显式重排为同一布局，避免出现“训练是一个顺序、validation 是另一个顺序”。
+训练和 validation 使用相同顺序。RGB、Part16 以及可选 Depth 必须在进入 VAE 前保持
+clip 起止时间、帧数和目标分辨率对齐。
 
-数据代码只保证文件/latent 的对应关系，不会判断视频内容是否时间对齐。RGB、Part16、Depth 必须在进入
-VAE 前具有相同 clip 起止时间、帧数和目标分辨率；不要用旧控制视频缩放来替代同一 mesh 的原分辨率渲染。
+## Clean RGB SRA projector
 
-### 3. Clean RGB SRA
-
-SRA head 位于 [`packages/ltx-trainer/src/ltx_trainer/sra.py`](packages/ltx-trainer/src/ltx_trainer/sra.py)，
-结构为逐 token 的：
+[sra.py](packages/ltx-trainer/src/ltx_trainer/sra.py) 实现的 projector 是逐 token residual MLP：
 
 ```text
-LayerNorm → Linear → GELU → K × residual linear block → LayerNorm → Linear
+LayerNorm → Linear → GELU → (Residual MLP Block) × K → LayerNorm → Linear
 ```
 
-其中 `K = clean_rgb_sra_num_layers - 2`，每个残差分支的可学习 scale 使用 `1 / sqrt(K)` 深度感知初始化。
+`K = clean_rgb_sra_num_layers - 2`。每个 residual block 都有可学习 scale，初始值为
+`1 / sqrt(K)`；输出层使用小方差权重和 zero bias 初始化。
 
-训练时在 transformer block `clean_rgb_sra_hidden_layer` 注册临时 forward hook，只截取 target 段 hidden：
+当前 SRA 消融参数：
 
-1. SRA head 输出与 patchified clean RGB VAE latent 维度一致。
-2. target `x0` 在计算 SRA loss 前 `detach()`，梯度只回到 SRA head 和 transformer/LoRA。
-3. 使用 SmoothL1 loss，并沿用 RGB target 的有效 loss mask。
-4. `clean_rgb_sra_loss_weight` 在前 `clean_rgb_sra_warmup_steps` 内线性 warm up。
-5. SRA head 可使用独立学习率，并作为单独的 `.pt` 文件保存/加载。
-
-当前示例配置：
-
-| 参数 | 示例值 | 作用 |
+| 参数 | 当前值 | 说明 |
 | --- | ---: | --- |
-| `clean_rgb_sra_loss_weight` | `0.05` | warmup 完成后的 SRA loss 权重 |
-| `clean_rgb_sra_hidden_layer` | `8` | 捕获 block index 8（从 0 开始，即第 9 个 block）的输出 |
-| `clean_rgb_sra_hidden_dim` | `1024` | SRA projector hidden width |
-| `clean_rgb_sra_num_layers` | `5` | projector 的 Linear 总层数（最少 2）；中间残差块数为 `num_layers - 2` |
-| `clean_rgb_sra_warmup_steps` | `100` | loss 权重线性 warmup |
+| `clean_rgb_sra_loss_weight` | `0.1` | warmup 完成后的权重 |
+| `clean_rgb_sra_hidden_layer` | `16` | 第 16 个 transformer block，**1-based** |
+| `clean_rgb_sra_hidden_dim` | `1024` | MLP hidden width |
+| `clean_rgb_sra_num_layers` | `3 / 5 / 8` | Linear 总层数消融 |
+| `clean_rgb_sra_warmup_steps` | `100` | SRA loss weight 线性 warmup |
 | `clean_rgb_sra_beta` | `0.05` | SmoothL1 beta |
-| `clean_rgb_sra_learning_rate` | `null` | `null` 表示跟随主 optimizer LR |
-| `clean_rgb_sra_checkpoint` | `null` | 可选的 SRA head warm-start checkpoint |
+| `clean_rgb_sra_learning_rate` | `2e-5` | SRA head 独立 LR |
 
-SRA checkpoint 保存到：
+SRA head 会包含在全量 checkpoint 中，也会单独导出为：
 
 ```text
 <output_dir>/checkpoints/clean_rgb_sra_head_step_XXXXX.pt
 ```
 
-W&B 新增指标：
+W&B 新增 `train/clean_rgb_sra_raw`、`train/clean_rgb_sra_loss` 和
+`train/clean_rgb_sra_weight`。
 
-- `train/clean_rgb_sra_raw`
-- `train/clean_rgb_sra_loss`
-- `train/clean_rgb_sra_weight`
+## 当前消融实验
 
-### 4. 修改文件索引
+[configs/ablations](packages/ltx-trainer/configs/ablations/) 包含四组对照：
 
-| 文件 | 相比官方代码的修改 |
-| --- | --- |
-| [`process_dataset.py`](packages/ltx-trainer/scripts/process_dataset.py) | 识别 `reference_video_1`，用同一个 Video VAE 独立生成 `reference_latents_1/`，并检查第二控制不能脱离第一控制单独存在。 |
-| [`flexible.py`](packages/ltx-trainer/src/ltx_trainer/training_strategies/flexible.py) | 保持多 reference 的 YAML 声明顺序；保留 clean RGB target latent 和 target 起始 index；实现 Clean RGB SRA loss。 |
-| [`base_strategy.py`](packages/ltx-trainer/src/ltx_trainer/training_strategies/base_strategy.py) | 在 `ModelInputs` 增加 `video_clean_latents` 和 `video_target_start_index`。 |
-| [`sra.py`](packages/ltx-trainer/src/ltx_trainer/sra.py) | 新增 Clean RGB SRA projector。 |
-| [`trainer.py`](packages/ltx-trainer/src/ltx_trainer/trainer.py) | 创建/加载 SRA head；捕获中间层；叠加 SRA loss；支持独立 LR、checkpoint 和 W&B metrics。 |
-| [`validation_runner.py`](packages/ltx-trainer/src/ltx_trainer/validation_runner.py) | 将官方 append 后的 reference 重排到 target 前面，使 validation 与 training 同为 `Part16 → Depth → target`。 |
-| [`v2v_two_control_ic_lora.yaml`](packages/ltx-trainer/configs/v2v_two_control_ic_lora.yaml) | 新增两个有序 reference 的完整示例和 Clean RGB SRA 参数。 |
-| [`tests/`](packages/ltx-trainer/tests/) | 增加双控制预处理、reference 顺序、配置、SRA detach/warmup/mask 和 validation 布局测试。 |
+| 实验 | SRA 层 | MLP 层数 |
+| --- | ---: | ---: |
+| Baseline | — | — |
+| SRA MLP-3 | 16 | 3 |
+| SRA MLP-5 | 16 | 5 |
+| SRA MLP-8 | 16 | 8 |
 
-### 5. 与官方保持一致的部分
+四组配置都是 1000 optimizer steps、effective global batch size 128、constant LR、
+`shifted_logit_normal` timestep sampling，并使用 4 节点、32 GPU FULL_SHARD FSDP。
 
-- 官方 LTX-2 checkpoint 加载、Gemma text embedding、Video VAE 和 RoPE/position 生成逻辑。
-- 官方 LoRA target modules、PEFT 包装、optimizer、gradient accumulation 和 checkpoint 主流程。
-- 官方 RGB flow-matching target、timestep sampler 和主 loss。
-- reference token 仍使用官方 IC-LoRA 的 clean-token conditioning 机制。
-
-示例配置的 `model.load_checkpoint` 当前为 `null`，因此默认是官方 base model 加新初始化的 LoRA，
-**不会自动加载某个官方 IC-LoRA adapter**。如果实验要求从官方 IC-LoRA 权重初始化，需要在配置中
-显式填写兼容 checkpoint，并在实验记录中注明。
-
-### 6. 配置、启动与对照
-
-先修改示例中的模型路径、数据路径、validation 视频、分辨率、steps 和 W&B：
+单机启动示例：
 
 ```bash
 cd packages/ltx-trainer
-uv run accelerate launch scripts/train.py configs/v2v_two_control_ic_lora.yaml
+uv run accelerate launch scripts/train.py configs/ablations/part16_stage1_baseline.yaml
 ```
 
-示例 YAML 是代码接口说明，不包含集群私有路径或实验数据。分辨率并未硬编码在训练实现中：
-训练分辨率由预计算 latent 决定，validation 分辨率由 `validation.video_dims` 决定。
+4 节点启动时，在四台机器上使用同一 `RUN_ID` 执行：
 
-查看本分支相对官方基线的全部代码差异：
+```bash
+scripts/launch_4node_fsdp.sh baseline_001 configs/ablations/part16_stage1_baseline.yaml
+```
+
+## 单 Part16 控制推理
+
+全量训练 checkpoint 是 transformer 权重，不是完整 pipeline checkpoint。推理时使用官方
+base checkpoint 提供模型 metadata、VAE 等组件，再覆盖训练后的 transformer 权重：
+
+```bash
+cd packages/ltx-trainer
+uv run python scripts/infer_part16_control.py \
+  --base-checkpoint /path/to/ltx-2.3-22b-dev.safetensors \
+  --trained-checkpoint /path/to/model_weights_step_01000.safetensors \
+  --gemma-root /path/to/gemma \
+  --control-video /path/to/part16.mp4 \
+  --prompt "A person follows the Part16 control motion." \
+  --width 768 --height 512 --num-frames 121 \
+  --output-path outputs/part16_result.mp4
+```
+
+[infer_part16_control.py](packages/ltx-trainer/scripts/infer_part16_control.py) 使用与训练一致的
+`[Part16 clean tokens | noisy RGB target tokens]` 布局。SRA head 只用于训练辅助 loss，
+推理时会自动忽略。分辨率、帧数和 reference scale factor 应与训练保持一致；
+`--include-control` 可保存控制与生成结果的左右对比视频。
+
+## 主要修改文件
+
+| 文件 | 修改 |
+| --- | --- |
+| [process_dataset.py](packages/ltx-trainer/scripts/process_dataset.py) | 预处理第一/第二 reference 视频 |
+| [flexible.py](packages/ltx-trainer/src/ltx_trainer/training_strategies/flexible.py) | reference 顺序、clean target latent 与 SRA loss |
+| [sra.py](packages/ltx-trainer/src/ltx_trainer/sra.py) | 可配置深度的 residual MLP projector |
+| [trainer.py](packages/ltx-trainer/src/ltx_trainer/trainer.py) | SRA hook/head、独立 LR、FSDP 训练与 checkpoint |
+| [validation_runner.py](packages/ltx-trainer/src/ltx_trainer/validation_runner.py) | validation reference 布局与训练对齐 |
+| [infer_part16_control.py](packages/ltx-trainer/scripts/infer_part16_control.py) | 单 Part16 全量 checkpoint 推理 |
+| [launch_4node_fsdp.sh](packages/ltx-trainer/scripts/launch_4node_fsdp.sh) | 4 节点 FSDP 启动 |
+
+查看相对官方基线的全部变更：
 
 ```bash
 git diff 9377758..main -- packages/ltx-trainer
 git log --oneline 9377758..main
 ```
 
-当前相关回归测试共 7 个，最后一次执行结果为 `7 passed`。
+相关回归测试覆盖参考条件顺序、预处理、SRA projector/loss、FSDP 保存与
+validation 布局。

@@ -28,4 +28,4 @@ adjust paths, dataset, and hyperparameters.
 
 The [`accelerate/`](./accelerate) directory holds the Accelerate launch configs (FSDP, DDP) for multi-GPU training.
 The [`ablations/`](./ablations) directory holds matched experiment configs. The Part16 stage-1 set uses 1-based SRA
-layer 16, 900 optimizer steps, effective global batch size 128, and full FSDP optimizer checkpoints.
+layer 16, 1000 optimizer steps, effective global batch size 128, and full FSDP optimizer checkpoints.

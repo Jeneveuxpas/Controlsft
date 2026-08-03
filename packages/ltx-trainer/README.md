@@ -40,6 +40,25 @@ training, and monitors the job while using the docs above as the source of truth
   use the [low VRAM config](configs/t2v_lora_low_vram.yaml) which enables INT8 quantization and other
   memory optimizations
 
+### Full-model Part16 inference
+
+Use the trainer-side script for a full fine-tuning checkpoint conditioned on one Part16 video. The official
+checkpoint provides model metadata and VAE components; the trained checkpoint replaces the transformer weights:
+
+```bash
+uv run python scripts/infer_part16_control.py \
+  --base-checkpoint /path/to/ltx-2.3-22b-dev.safetensors \
+  --trained-checkpoint /path/to/model_weights_step_01000.safetensors \
+  --gemma-root /path/to/gemma \
+  --control-video /path/to/part16.mp4 \
+  --prompt "A person follows the Part16 control motion." \
+  --width 768 --height 512 --num-frames 121 \
+  --output-path outputs/part16_result.mp4
+```
+
+The script ignores the training-only Clean RGB SRA head. Match output dimensions and reference scale factors to
+training; add `--include-control` for a side-by-side control/generated video.
+
 ---
 
 ## 🤝 Contributing

@@ -211,6 +211,24 @@ production-ready pipelines:
 
 All pipelines support loading custom LoRAs trained with this trainer.
 
+For a Part16-controlled **full-model** checkpoint, use the trainer-side inference
+script. It loads model metadata and VAE/Gemma components from the official base
+checkpoint, then applies the full fine-tuning checkpoint as a transformer overlay:
+
+```bash
+uv run python scripts/infer_part16_control.py \
+  --base-checkpoint /path/to/ltx-2.3-22b-dev.safetensors \
+  --trained-checkpoint /path/to/model_weights_step_01000.safetensors \
+  --gemma-root /path/to/gemma \
+  --control-video /path/to/part16.mp4 \
+  --prompt "A person performs the controlled motion." \
+  --width 768 --height 512 --num-frames 121 \
+  --output-path outputs/part16_result.mp4
+```
+
+The output dimensions and reference scale factors must match training. Pass
+`--include-control` to save the control and generated video side by side.
+
 ## 🚀 Training Scripts
 
 ### Basic and Distributed Training
