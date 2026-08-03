@@ -2,7 +2,7 @@ import pytest
 import torch
 from pydantic import ValidationError
 
-from ltx_trainer.sra import CleanRGBSRAHead
+from ltx_trainer.sra import CleanRGBSRAHead, extract_clean_rgb_sra_state_dict
 from ltx_trainer.training_strategies.base_strategy import ModelInputs
 from ltx_trainer.training_strategies.flexible import (
     FlexibleStrategy,
@@ -46,6 +46,17 @@ def test_clean_rgb_sra_head_depth_and_learnable_residual_scaling() -> None:
 def test_clean_rgb_sra_head_rejects_fewer_than_two_layers() -> None:
     with pytest.raises(ValueError, match="at least 2"):
         CleanRGBSRAHead(input_dim=32, hidden_dim=16, output_dim=8, num_layers=1)
+
+
+def test_extract_clean_rgb_sra_state_dict_strips_any_model_prefix() -> None:
+    weight = torch.randn(4, 4)
+    state = {
+        "transformer_blocks.0.weight": torch.randn(4, 4),
+        "base_model.model.clean_rgb_sra_head.input_proj.weight": weight,
+    }
+    extracted = extract_clean_rgb_sra_state_dict(state)
+    assert set(extracted) == {"input_proj.weight"}
+    assert extracted["input_proj.weight"] is weight
 
 
 def test_clean_rgb_sra_hidden_layer_is_one_based() -> None:

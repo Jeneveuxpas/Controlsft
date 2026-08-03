@@ -45,7 +45,7 @@ from ltx_trainer.model_loader import load_embeddings_processor, load_transformer
 from ltx_trainer.progress import TrainingProgress
 from ltx_trainer.quantization import quantize_model
 from ltx_trainer.sigma_tracker import SigmaBucketTracker
-from ltx_trainer.sra import CleanRGBSRAHead
+from ltx_trainer.sra import CleanRGBSRAHead, extract_clean_rgb_sra_state_dict
 from ltx_trainer.timestep_samplers import SAMPLERS
 from ltx_trainer.training_state import ConfigFingerprint, RngStates, TrainingState
 from ltx_trainer.training_strategies import get_training_strategy
@@ -201,6 +201,11 @@ class LtxvTrainer:
         peak_mem_during_training = start_mem
 
         sampled_videos_paths = None
+        accumulation = cfg.optimization.gradient_accumulation_steps
+        metric_sums: dict[str, Tensor] = {}
+        sigma_window: list[float] = []
+        loss_window: list[float] = []
+        optimization_step_start = time.time()
 
         with progress:
             if cfg.validation.interval and not cfg.validation.skip_initial_validation:
@@ -209,7 +214,11 @@ class LtxvTrainer:
 
             self._accelerator.wait_for_everyone()
 
-            for step in range(remaining_steps * cfg.optimization.gradient_accumulation_steps):
+            for step in range(remaining_steps * accumulation):
+                if step % accumulation == 0:
+                    self._global_step += 1
+                    optimization_step_start = time.time()
+
                 # Get next batch, reset the dataloader if needed
                 try:
                     batch = next(data_iter)
@@ -217,13 +226,18 @@ class LtxvTrainer:
                     data_iter = iter(self._dataloader)
                     batch = next(data_iter)
 
-                step_start_time = time.time()
                 with self._accelerator.accumulate(self._transformer):
-                    is_optimization_step = (step + 1) % cfg.optimization.gradient_accumulation_steps == 0
-                    if is_optimization_step:
-                        self._global_step += 1
+                    is_optimization_step = (step + 1) % accumulation == 0
 
                     output = self._training_step(batch)
+                    microbatch_metrics = {
+                        "train/loss": output.loss.detach().float().mean(),
+                        **{name: value.detach().float().mean() for name, value in output.metrics.items()},
+                    }
+                    for name, value in microbatch_metrics.items():
+                        metric_sums[name] = metric_sums.get(name, torch.zeros_like(value)) + value
+                    sigma_window.extend(output.sigma.detach().float().cpu().tolist())
+                    loss_window.extend(output.loss.detach().float().cpu().tolist())
                     self._accelerator.backward(output.loss.mean())
 
                     if self._accelerator.sync_gradients and cfg.optimization.max_grad_norm > 0:
@@ -267,8 +281,20 @@ class LtxvTrainer:
 
                     # Update progress and log metrics
                     current_lr = self._optimizer.param_groups[0]["lr"]
-                    step_time = (time.time() - step_start_time) * cfg.optimization.gradient_accumulation_steps
-                    step_loss = output.loss.detach().mean().item()
+                    step_time = time.time() - optimization_step_start
+                    aggregated_metrics: dict[str, float] = {}
+                    gathered_sigmas: list[float] = []
+                    gathered_losses: list[float] = []
+                    if is_optimization_step:
+                        for name in sorted(metric_sums):
+                            global_mean = self._accelerator.reduce(metric_sums[name] / accumulation, reduction="mean")
+                            aggregated_metrics[name] = global_mean.item()
+                        gathered_sigmas = gather_object(sigma_window)
+                        gathered_losses = gather_object(loss_window)
+                        metric_sums.clear()
+                        sigma_window.clear()
+                        loss_window.clear()
+                    step_loss = aggregated_metrics.get("train/loss", output.loss.detach().float().mean().item())
 
                     progress.update_training(
                         loss=step_loss,
@@ -279,22 +305,21 @@ class LtxvTrainer:
 
                     # Log metrics to W&B (only on main process and optimization steps)
                     if IS_MAIN_PROCESS and is_optimization_step:
-                        # Track per-element loss by sigma bucket
-                        self._sigma_tracker.update(output.sigma.cpu().tolist(), output.loss.detach().cpu().tolist())
+                        # Track the full effective global batch by sigma bucket.
+                        self._sigma_tracker.update(gathered_sigmas, gathered_losses)
                         metrics = {
-                            "train/loss": step_loss,
+                            **aggregated_metrics,
                             "train/learning_rate": current_lr,
                             "train/step_time": step_time,
                             "train/global_step": self._global_step,
                         }
+                        if self._clean_rgb_sra_enabled() and len(self._optimizer.param_groups) > 1:
+                            metrics["train/sra_learning_rate"] = self._optimizer.param_groups[1]["lr"]
                         metrics.update(self._sigma_tracker.get_metrics())
-                        metrics.update(
-                            {name: value.detach().float().mean().item() for name, value in output.metrics.items()}
-                        )
                         self._log_metrics(metrics)
 
                     # Fallback logging when progress bars are disabled
-                    if disable_progress_bars and IS_MAIN_PROCESS and self._global_step % 20 == 0:
+                    if disable_progress_bars and IS_MAIN_PROCESS and is_optimization_step and self._global_step % 20 == 0:
                         elapsed = time.time() - train_start_time
                         steps_done = self._global_step - initial_step
                         if steps_done > 0:
@@ -429,14 +454,15 @@ class LtxvTrainer:
 
         # Official flow-matching loss remains unchanged.
         loss = self._training_strategy.compute_loss(video_pred, audio_pred, model_inputs)
-        aux_metrics: dict[str, Tensor] = {}
+        aux_metrics: dict[str, Tensor] = {"train/denoising_loss": loss.detach().float().mean()}
         if self._clean_rgb_sra_enabled():
             if "video" not in captured_sra_prediction:
                 raise ValueError("Clean RGB SRA did not produce a prediction from the requested intermediate state")
             clean_rgb_pred = captured_sra_prediction["video"]
-            clean_rgb_sra_loss, aux_metrics = self._training_strategy.compute_clean_rgb_sra_loss(
+            clean_rgb_sra_loss, sra_metrics = self._training_strategy.compute_clean_rgb_sra_loss(
                 clean_rgb_pred, model_inputs, self._global_step
             )
+            aux_metrics.update(sra_metrics)
             loss = loss + clean_rgb_sra_loss
 
         # Sigma comes from whichever modality is generated (video preferred, else audio).
@@ -1193,7 +1219,7 @@ class LtxvTrainer:
 
             self._checkpoint_paths.append(saved_weights_path)
             self._cleanup_checkpoints()
-            self._save_clean_rgb_sra_head(save_dir)
+            self._save_clean_rgb_sra_head(save_dir, full_state_dict, save_dtype)
 
         # FSDP optimizer checkpointing is collective, so every rank must enter.
         self._accelerator.wait_for_everyone()
@@ -1203,15 +1229,17 @@ class LtxvTrainer:
 
         return saved_weights_path if IS_MAIN_PROCESS else None
 
-    def _save_clean_rgb_sra_head(self, save_dir: Path) -> None:
+    def _save_clean_rgb_sra_head(
+        self, save_dir: Path, full_state_dict: dict[str, Tensor], save_dtype: torch.dtype
+    ) -> None:
         if not self._clean_rgb_sra_enabled():
             return
-        unwrapped = self._accelerator.unwrap_model(self._transformer, keep_torch_compile=False)
-        head = self._find_model_attr(unwrapped, "clean_rgb_sra_head")
-        if head is None:
-            raise ValueError("Clean RGB SRA head is not attached during checkpoint save")
+        head_state = extract_clean_rgb_sra_state_dict(full_state_dict)
         payload = {
-            "clean_rgb_sra_head": {key: value.detach().cpu() for key, value in head.state_dict().items()},
+            "clean_rgb_sra_head": {
+                key: value.detach().to(device="cpu", dtype=save_dtype).contiguous()
+                for key, value in head_state.items()
+            },
             "metadata": {
                 "global_step": int(self._global_step),
                 "clean_rgb_sra_hidden_layer": int(self._config.training_strategy.clean_rgb_sra_hidden_layer),

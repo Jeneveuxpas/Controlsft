@@ -1,7 +1,17 @@
 import math
+from collections.abc import Mapping
 
 import torch
 from torch import Tensor, nn
+
+
+def extract_clean_rgb_sra_state_dict(state_dict: Mapping[str, Tensor]) -> dict[str, Tensor]:
+    """Extract an SRA head from a full model state dict and remove its model prefix."""
+    marker = "clean_rgb_sra_head."
+    extracted = {key.split(marker, 1)[1]: value for key, value in state_dict.items() if marker in key}
+    if not extracted:
+        raise ValueError("Full model state dict contains no Clean RGB SRA head")
+    return extracted
 
 
 class _ResidualLayer(nn.Module):
