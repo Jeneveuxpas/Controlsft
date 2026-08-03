@@ -392,19 +392,31 @@ class LtxvTrainer:
         # Use strategy to prepare training inputs (returns ModelInputs with Modality objects)
         model_inputs = self._training_strategy.prepare_training_inputs(batch, self._timestep_sampler)
 
-        # Capture one intermediate video block only when Clean RGB SRA is enabled.
-        captured_hidden: dict[str, Tensor] = {}
+        # Run the SRA head from the selected block hook. Under FSDP the head is
+        # part of the root flat parameter, which is only materialized during the
+        # transformer forward; calling it after the forward sees empty shards on
+        # some ranks.
+        captured_sra_prediction: dict[str, Tensor] = {}
         hook_handle = None
         if self._clean_rgb_sra_enabled():
+            if model_inputs.video_target_start_index is None:
+                raise ValueError("Clean RGB SRA requires the target token start index")
             block = self._clean_rgb_sra_block()
+            head = self._find_model_attr(self._transformer, "clean_rgb_sra_head")
+            if head is None:
+                raise ValueError("Clean RGB SRA head is not attached")
 
-            def _capture_hidden(_module, _inputs, output) -> None:
+            def _run_sra_head(_module, _inputs, output) -> None:
                 video_args = output[0]
                 if video_args is None:
                     raise ValueError("Clean RGB SRA requested but the selected block returned no video state")
-                captured_hidden["video"] = video_args.x
+                target_hidden = video_args.x[:, model_inputs.video_target_start_index :, :]
+                head_param = next(head.parameters())
+                captured_sra_prediction["video"] = head(
+                    target_hidden.to(device=head_param.device, dtype=head_param.dtype)
+                )
 
-            hook_handle = block.register_forward_hook(_capture_hidden)
+            hook_handle = block.register_forward_hook(_run_sra_head)
         try:
             video_pred, audio_pred = self._transformer(
                 video=model_inputs.video,
@@ -419,16 +431,9 @@ class LtxvTrainer:
         loss = self._training_strategy.compute_loss(video_pred, audio_pred, model_inputs)
         aux_metrics: dict[str, Tensor] = {}
         if self._clean_rgb_sra_enabled():
-            if "video" not in captured_hidden:
-                raise ValueError("Clean RGB SRA did not capture the requested intermediate hidden state")
-            if model_inputs.video_target_start_index is None:
-                raise ValueError("Clean RGB SRA requires the target token start index")
-            target_hidden = captured_hidden["video"][:, model_inputs.video_target_start_index :, :]
-            head = self._find_model_attr(self._transformer, "clean_rgb_sra_head")
-            if head is None:
-                raise ValueError("Clean RGB SRA head is not attached")
-            head_param = next(head.parameters())
-            clean_rgb_pred = head(target_hidden.to(device=head_param.device, dtype=head_param.dtype))
+            if "video" not in captured_sra_prediction:
+                raise ValueError("Clean RGB SRA did not produce a prediction from the requested intermediate state")
+            clean_rgb_pred = captured_sra_prediction["video"]
             clean_rgb_sra_loss, aux_metrics = self._training_strategy.compute_clean_rgb_sra_loss(
                 clean_rgb_pred, model_inputs, self._global_step
             )
