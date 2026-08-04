@@ -229,6 +229,24 @@ uv run python scripts/infer_part16_control.py \
 The output dimensions and reference scale factors must match training. Pass
 `--include-control` to save the control and generated video side by side.
 
+For a precomputed test manifest, batch inference can consume the control latent
+and TE features directly without loading the original target video latent,
+Gemma, or the VAE encoder:
+
+```bash
+uv run python scripts/infer_part16_precomputed.py \
+  --base-checkpoint /path/to/ltx-2.3-22b-dev.safetensors \
+  --trained-checkpoint /path/to/model_weights_step_01000.safetensors \
+  --manifest-path /path/to/test.jsonl \
+  --output-dir outputs/test_precomputed \
+  --start-index 0 \
+  --num-samples 16
+```
+
+The default manifest fields are `reference_latents` (signal latent) and
+`conditions` (TE). CFG is disabled by default; CFG greater than one requires a
+precomputed `--negative-te` file.
+
 ## 🚀 Training Scripts
 
 ### Basic and Distributed Training

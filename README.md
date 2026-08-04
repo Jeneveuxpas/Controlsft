@@ -172,6 +172,26 @@ uv run python scripts/infer_part16_control.py \
 推理时会自动忽略。分辨率、帧数和 reference scale factor 应与训练保持一致；
 `--include-control` 可保存控制与生成结果的左右对比视频。
 
+如果测试集已经包含 `signal_latent` 和 `te`，可以跳过原始视频、VAE encoder 和
+Gemma，直接按 manifest 批量生成。目标噪声尺寸由 signal latent 推导，不读取
+`video_latent`：
+
+```bash
+cd packages/ltx-trainer
+uv run python scripts/infer_part16_precomputed.py \
+  --base-checkpoint /path/to/ltx-2.3-22b-dev.safetensors \
+  --trained-checkpoint /path/to/model_weights_step_01000.safetensors \
+  --manifest-path /path/to/test.jsonl \
+  --output-dir outputs/test_precomputed \
+  --start-index 0 \
+  --num-samples 16
+```
+
+默认读取 manifest 的 `reference_latents` 和 `conditions` 字段，对应
+`signal_latent` 和 `te`。默认 `guidance_scale=1`；如需 CFG，使用
+`--guidance-scale 4 --negative-te /path/to/negative_te.pt`。批次包含不同 FPS 时，
+建议按 FPS 分开运行并传入 `--frame-rate`。
+
 ## 主要修改文件
 
 | 文件 | 修改 |
@@ -182,6 +202,7 @@ uv run python scripts/infer_part16_control.py \
 | [trainer.py](packages/ltx-trainer/src/ltx_trainer/trainer.py) | SRA hook/head、独立 LR、FSDP 训练与 checkpoint |
 | [validation_runner.py](packages/ltx-trainer/src/ltx_trainer/validation_runner.py) | validation reference 布局与训练对齐 |
 | [infer_part16_control.py](packages/ltx-trainer/scripts/infer_part16_control.py) | 单 Part16 全量 checkpoint 推理 |
+| [infer_part16_precomputed.py](packages/ltx-trainer/scripts/infer_part16_precomputed.py) | 从 signal latent + TE 批量推理 |
 | [launch_4node_fsdp.sh](packages/ltx-trainer/scripts/launch_4node_fsdp.sh) | 4 节点 FSDP 启动 |
 
 查看相对官方基线的全部变更：

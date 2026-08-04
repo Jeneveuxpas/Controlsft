@@ -23,7 +23,6 @@ from ltx_trainer.model_loader import load_transformer
 from ltx_trainer.progress import TrainingProgress
 from ltx_trainer.validation_runner import ValidationRunner
 
-
 DEFAULT_NEGATIVE_PROMPT = "worst quality, inconsistent motion, blurry, jittery, distorted"
 console = Console()
 
@@ -37,9 +36,7 @@ def load_finetuned_transformer(
     """Build LTX-2.3 from the official checkpoint and apply full-tune weights."""
     transformer = load_transformer(base_checkpoint, device=device, dtype=torch.bfloat16)
     state_dict = load_file(trained_checkpoint, device="cpu")
-    inference_state = {
-        name: value for name, value in state_dict.items() if "clean_rgb_sra_head." not in name
-    }
+    inference_state = {name: value for name, value in state_dict.items() if "clean_rgb_sra_head." not in name}
 
     incompatible = transformer.load_state_dict(inference_state, strict=False)
     if incompatible.missing_keys or incompatible.unexpected_keys:
@@ -70,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--inference-steps", type=int, default=30)
     parser.add_argument("--guidance-scale", type=float, default=4.0)
     parser.add_argument("--stg-scale", type=float, default=1.0)
-    parser.add_argument("--stg-blocks", type=int, nargs="+", default=[28])
+    parser.add_argument("--stg-blocks", type=int, nargs="+", default=[29])
     parser.add_argument("--negative-prompt", default=DEFAULT_NEGATIVE_PROMPT)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(

@@ -136,15 +136,31 @@ class ValidationRunner:
         model_path: str | Path,
         text_encoder_path: str | Path | None,
         load_text_encoder_in_8bit: bool = False,
+        precomputed_embeddings: list[CachedPromptEmbeddings] | None = None,
+        precomputed_media: list[CachedSampleMedia] | None = None,
+        tiled_video_decode: bool = True,
     ):
         self._config = config
         self._model_path = Path(model_path)
+        self._tiled_video_decode = tiled_video_decode
 
         self._video_patchifier = VideoLatentPatchifier(patch_size=1)
         self._audio_patchifier = AudioPatchifier(patch_size=1)
 
-        self._cached_embeddings = self._cache_prompt_embeddings(text_encoder_path, load_text_encoder_in_8bit)
-        self._cached_media = self._encode_conditioning_media()
+        sample_count = len(config.samples)
+        if precomputed_embeddings is not None and len(precomputed_embeddings) != sample_count:
+            raise ValueError(
+                f"Expected {sample_count} precomputed embedding entries, got {len(precomputed_embeddings)}"
+            )
+        if precomputed_media is not None and len(precomputed_media) != sample_count:
+            raise ValueError(f"Expected {sample_count} precomputed media entries, got {len(precomputed_media)}")
+
+        self._cached_embeddings = (
+            precomputed_embeddings
+            if precomputed_embeddings is not None
+            else self._cache_prompt_embeddings(text_encoder_path, load_text_encoder_in_8bit)
+        )
+        self._cached_media = precomputed_media if precomputed_media is not None else self._encode_conditioning_media()
         self._load_decoder_components()
 
     # ------------------------------------------------------------------
@@ -570,6 +586,17 @@ class ValidationRunner:
             sampling_ctx=sampling_ctx,
         )
 
+        # Reference tokens are prepended above to match training, while
+        # ``LatentTools.clear_conditioning()`` removes tokens from the end.
+        # Restore the inference API's [target, references...] layout before
+        # finalization so decoding keeps the generated target rather than the
+        # clean reference.
+        if video_state is not None and video_tools is not None and any(
+            cond.type == "reference" and getattr(cond, "video", None) is not None for cond in sample.conditions
+        ):
+            target_len = video_tools.target_shape.token_count()
+            video_state = self._move_prefixed_video_references_to_suffix(video_state, target_len)
+
         # 5. Decode modalities (both generated and frozen — frozen audio/video is included in output)
         video_output = self._finalize_modality(video_state, video_tools, self._decode_video, device)
         audio_output = self._finalize_modality(audio_state, audio_tools, self._decode_audio, device)
@@ -601,6 +628,40 @@ class ValidationRunner:
             [
                 torch.arange(target_len, total_len, device=state.latent.device),
                 torch.arange(target_len, device=state.latent.device),
+            ]
+        )
+        attention_mask = state.attention_mask
+        if attention_mask is not None:
+            attention_mask = attention_mask.index_select(1, token_order).index_select(2, token_order)
+
+        return LatentState(
+            latent=state.latent.index_select(1, token_order),
+            denoise_mask=state.denoise_mask.index_select(1, token_order),
+            positions=state.positions.index_select(2, token_order),
+            clean_latent=state.clean_latent.index_select(1, token_order),
+            attention_mask=attention_mask,
+        )
+
+    @staticmethod
+    def _move_prefixed_video_references_to_suffix(state: LatentState, target_len: int) -> LatentState:
+        """Restore ``[target, references...]`` before clearing conditioning.
+
+        Denoising uses training's ``[references..., target]`` layout. The
+        generic latent tools, however, remove appended conditioning by keeping
+        the first ``target_len`` tokens. Rotate all token-indexed fields back so
+        those first tokens are the generated target.
+        """
+        total_len = state.latent.shape[1]
+        if total_len == target_len:
+            return state
+        if target_len > total_len:
+            raise ValueError(f"target_len ({target_len}) exceeds total token count ({total_len})")
+
+        target_start = total_len - target_len
+        token_order = torch.cat(
+            [
+                torch.arange(target_start, total_len, device=state.latent.device),
+                torch.arange(target_start, device=state.latent.device),
             ]
         )
         attention_mask = state.attention_mask
@@ -915,12 +976,15 @@ class ValidationRunner:
         return decode_fn(state, device)
 
     def _decode_video(self, video_state: LatentState, device: torch.device) -> Tensor:
-        """Decode video latents to pixels using tiled VAE decoding."""
+        """Decode video latents to pixels using full or tiled VAE decoding."""
         self._vae_decoder.to(device)
         latent = video_state.latent.to(dtype=torch.bfloat16)
 
-        chunks = list(self._vae_decoder.tiled_decode(latent, tiling_config=_DEFAULT_TILING))
-        decoded_video = torch.cat(chunks, dim=2)
+        if self._tiled_video_decode:
+            chunks = list(self._vae_decoder.tiled_decode(latent, tiling_config=_DEFAULT_TILING))
+            decoded_video = torch.cat(chunks, dim=2)
+        else:
+            decoded_video = self._vae_decoder(latent)
 
         decoded_video = ((decoded_video + 1.0) / 2.0).clamp(0.0, 1.0)
         self._vae_decoder.to("cpu")
