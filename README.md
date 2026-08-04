@@ -113,7 +113,7 @@ scripts/launch_4node_fsdp.sh baseline_001 configs/ablations/part16_stage1_baseli
 
 ### Stage-2：对齐层、loss 与 Pure SFT
 
-Stage-2 固定 SRA projector 为 5 层、hidden dim 为 1024，四组实验如下：
+Stage-2 固定 SRA projector 为 5 层、hidden dim 为 1024，实验如下：
 
 | 实验 | Part16 control | SRA 对齐层（1-based） | SRA loss | SRA weight | 配置 |
 | --- | --- | ---: | --- | ---: | --- |
@@ -121,8 +121,9 @@ Stage-2 固定 SRA projector 为 5 层、hidden dim 为 1024，四组实验如�
 | Layer 24 | 有 | 24 | Smooth L1 | 0.1 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_sra_mlp5_layer24.yaml) |
 | Layer 16 Cosine | 有 | 16 | `1 - cosine_similarity` | 0.1 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_sra_mlp5_layer16_cosine.yaml) |
 | Pure SFT | 无 | — | 无 | 0.0 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_pure_sft.yaml) |
+| No-control SFT + SRA | 无 | 16 | Smooth L1 | 0.1 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_no_control_sra_mlp5_layer16_l1.yaml) |
 
-四份配置统一保持：
+五份配置统一保持：
 
 - 同一个 step-40000 FP32 初始 transformer checkpoint；
 - transformer LR `4e-6`、AdamW、constant scheduler；
@@ -133,7 +134,9 @@ Stage-2 固定 SRA projector 为 5 层、hidden dim 为 1024，四组实验如�
 
 前三组使用 Part16 reference control；Pure SFT 的 `video.conditions: []` 且
 `clean_rgb_sra_loss_weight: 0.0`，因此不会读取 `reference_latents`，也不会创建
-SRA head。Cosine 组当前先保留 weight 0.1 做短跑尺度检查；应在 100-step warmup 完成后观察
+SRA head。No-control SFT + SRA 同样设置 `video.conditions: []`，不会读取或向
+transformer 输入 `reference_latents`，但会在第 16 层使用 5 层 SRA head，以主视频自身的
+clean x0 latent 作为 Smooth L1 监督目标。Cosine 组当前先保留 weight 0.1 做短跑尺度检查；应在 100-step warmup 完成后观察
 `clean_rgb_sra_loss / denoising_loss`，再决定是否降低权重。
 
 四机启动模板（同一任务的四个节点使用相同 RUN_ID 和命令）：

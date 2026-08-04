@@ -1,0 +1,78 @@
+# Stage-2 matched ablation: no Part16/reference control is provided to the
+# transformer, while a five-layer SRA head at layer 16 (1-based) regresses the
+# clean target-video x0 latent with Smooth L1.
+model:
+  model_path: "/workspace/code/controlsft_teacher/checkpoints/ltx-2.3/ltx-2.3-22b-dev.safetensors"
+  text_encoder_path: null
+  training_mode: "full"
+  load_checkpoint: "/workspace/code/controlsft_teacher/checkpoints/merged/model_weights_step_40000_fp32.safetensors"
+
+training_strategy:
+  name: "flexible"
+  video:
+    is_generated: true
+    latents_dir: "latents"
+    conditions: []  # Do not load or prepend Part16/reference control latents.
+  clean_rgb_sra_checkpoint: null
+  clean_rgb_sra_loss_weight: 0.1
+  clean_rgb_sra_learning_rate: 2.0e-5
+  clean_rgb_sra_hidden_layer: 16
+  clean_rgb_sra_hidden_dim: 1024
+  clean_rgb_sra_num_layers: 5
+  clean_rgb_sra_warmup_steps: 100
+  clean_rgb_sra_loss_type: "smooth_l1"
+  clean_rgb_sra_beta: 0.05
+
+optimization:
+  learning_rate: 4.0e-6
+  steps: 1000
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  max_grad_norm: 1.0
+  optimizer_type: "adamw"
+  scheduler_type: "constant"
+  scheduler_params: {}
+  enable_gradient_checkpointing: true
+
+acceleration:
+  mixed_precision_mode: "bf16"
+  quantization: null
+  load_text_encoder_in_8bit: false
+  offload_optimizer_during_validation: false
+
+data:
+  preprocessed_data_root: "/workspace"
+  manifest_path: "/workspace/code/controlsft_teacher/Controlsft/datasets/controlsft_teacher_250k/train.jsonl"
+  num_dataloader_workers: 2
+
+validation:
+  samples: []
+  interval: null
+  generate_audio: false
+  generate_video: false
+  skip_initial_validation: true
+
+checkpoints:
+  interval: 200
+  keep_last_n: 4
+  precision: "bfloat16"
+  save_training_state: "full"
+  no_resume: true
+
+flow_matching:
+  timestep_sampling_mode: "shifted_logit_normal"
+  timestep_sampling_params: {}
+
+hub:
+  push_to_hub: false
+  hub_model_id: null
+
+wandb:
+  enabled: true
+  project: "ltx-2.3-part16-control"
+  entity: null
+  tags: ["ablation-stage2", "no-control", "sra-mlp5", "layer16", "smooth-l1", "fsdp", "4node", "gbs128"]
+  log_validation_videos: false
+
+seed: 42
+output_dir: "/workspace/code/controlsft_teacher/outputs/ablation_stage2_no_control_sra_mlp5_layer16_l1"
