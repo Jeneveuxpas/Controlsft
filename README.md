@@ -2,8 +2,9 @@
 
 > [!IMPORTANT]
 > 本仓库的 `main` 分支基于官方 LTX-2，目前用于研究视频 reference 控制和
-> Clean RGB SRA 辅助监督。当前 Stage-1 消融使用**单个 Part16 控制 + 全量微调**，
-> 代码同时保留 `Part16 + Depth` 两个有序 reference 的能力。
+> Clean RGB SRA 辅助监督。Stage-1 比较 SRA projector 深度；Stage-2 固定为 5 层 MLP，
+> 比较对齐层、Cosine/Smooth L1 目标以及无 control、无 x0 对齐的 Pure SFT。
+> 两阶段均使用**全量微调**，代码同时保留 `Part16 + Depth` 两个有序 reference 的能力。
 >
 > 官方基线：[`Lightricks/LTX-2@9377758`](https://github.com/Lightricks/LTX-2/tree/9377758131b1ffde4b7f766804590a6617bf2ab9)
 
@@ -83,6 +84,8 @@ W&B 新增 `train/clean_rgb_sra_raw`、`train/clean_rgb_sra_loss` 和
 
 ## 当前消融实验
 
+### Stage-1：MLP 深度
+
 [configs/ablations](packages/ltx-trainer/configs/ablations/) 包含四组对照：
 
 | 实验 | SRA 层 | MLP 层数 |
@@ -107,6 +110,42 @@ uv run accelerate launch scripts/train.py configs/ablations/part16_stage1_baseli
 ```bash
 scripts/launch_4node_fsdp.sh baseline_001 configs/ablations/part16_stage1_baseline.yaml
 ```
+
+### Stage-2：对齐层、loss 与 Pure SFT
+
+Stage-2 固定 SRA projector 为 5 层、hidden dim 为 1024，四组实验如下：
+
+| 实验 | Part16 control | SRA 对齐层（1-based） | SRA loss | SRA weight | 配置 |
+| --- | --- | ---: | --- | ---: | --- |
+| Layer 8 | 有 | 8 | Smooth L1 | 0.1 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_sra_mlp5_layer8.yaml) |
+| Layer 24 | 有 | 24 | Smooth L1 | 0.1 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_sra_mlp5_layer24.yaml) |
+| Layer 16 Cosine | 有 | 16 | `1 - cosine_similarity` | 0.1 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_sra_mlp5_layer16_cosine.yaml) |
+| Pure SFT | 无 | — | 无 | 0.0 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_pure_sft.yaml) |
+
+四份配置统一保持：
+
+- 同一个 step-40000 FP32 初始 transformer checkpoint；
+- transformer LR `4e-6`、AdamW、constant scheduler；
+- 1000 optimizer steps、effective global batch size 128；
+- BF16 FSDP FULL_SHARD，FP32 optimizer state；
+- 每 200 step 保存，最多保留 4 个 checkpoint；
+- 同一训练 manifest、seed 和 timestep sampler。
+
+前三组使用 Part16 reference control；Pure SFT 的 `video.conditions: []` 且
+`clean_rgb_sra_loss_weight: 0.0`，因此不会读取 `reference_latents`，也不会创建
+SRA head。Cosine 组当前先保留 weight 0.1 做短跑尺度检查；应在 100-step warmup 完成后观察
+`clean_rgb_sra_loss / denoising_loss`，再决定是否降低权重。
+
+四机启动模板（同一任务的四个节点使用相同 RUN_ID 和命令）：
+
+```bash
+packages/ltx-trainer/scripts/launch_4node_fsdp.sh \
+  <unique_run_id> \
+  packages/ltx-trainer/configs/ablations/<stage2_config>.yaml
+```
+
+平台 Start Command 建议写成一行，并为每个实验使用不同 RUN_ID；启动器会自动分配
+machine rank，并使用平台提供的 `MASTER_PORT`（未提供时默认为 2345）。
 
 ## 单 Part16 控制推理
 
