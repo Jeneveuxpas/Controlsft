@@ -16,6 +16,7 @@ adjust paths, dataset, and hyperparameters.
 | **V2V IC-LoRA**       | Generated | —         | `reference`         | [`v2v_ic_lora.yaml`](./v2v_ic_lora.yaml) |
 | **Part16 V2V Full Baseline** | Generated | —  | `reference`         | [`v2v_part16_full_baseline.yaml`](./v2v_part16_full_baseline.yaml) |
 | **Part16 Stage-1 SRA Ablation** | Generated | — | `reference` | [`baseline`](./ablations/part16_stage1_baseline.yaml), [`MLP-3`](./ablations/part16_stage1_sra_mlp3_layer16.yaml), [`MLP-5`](./ablations/part16_stage1_sra_mlp5_layer16.yaml), [`MLP-8`](./ablations/part16_stage1_sra_mlp8_layer16.yaml) |
+| **Part16 Stage-2 Ablation** | Generated | — | `reference` / — | [`layer-8`](./ablations/part16_stage2_sra_mlp5_layer8.yaml), [`layer-24`](./ablations/part16_stage2_sra_mlp5_layer24.yaml), [`layer-16 cosine`](./ablations/part16_stage2_sra_mlp5_layer16_cosine.yaml), [`pure SFT`](./ablations/part16_stage2_pure_sft.yaml) |
 | **A2V**               | Generated | Frozen    | —                   | [`a2v_lora.yaml`](./a2v_lora.yaml) |
 | **V2A (Foley)**       | Frozen    | Generated | —                   | [`v2a_lora.yaml`](./v2a_lora.yaml) |
 | **Video Inpainting**  | Generated | —         | `mask`              | [`video_inpainting_lora.yaml`](./video_inpainting_lora.yaml) |
@@ -29,3 +30,6 @@ adjust paths, dataset, and hyperparameters.
 The [`accelerate/`](./accelerate) directory holds the Accelerate launch configs (FSDP, DDP) for multi-GPU training.
 The [`ablations/`](./ablations) directory holds matched experiment configs. The Part16 stage-1 set uses 1-based SRA
 layer 16, 1000 optimizer steps, effective global batch size 128, and full FSDP optimizer checkpoints.
+The stage-2 set fixes the projector at five linear layers and compares transformer layers 8 and 24, cosine
+alignment at layer 16, and pure SFT without reference control or x0 alignment. All stage-2 configs keep the
+optimizer, data, seed, global batch size, and checkpoint policy fixed.

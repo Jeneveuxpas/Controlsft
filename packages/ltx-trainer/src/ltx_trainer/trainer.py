@@ -604,6 +604,7 @@ class LtxvTrainer:
         logger.info(
             f"Enabled Clean RGB SRA: layer={layer_number} (1-based), hidden_dim={hidden_dim}, "
             f"projector_layers={num_layers}, "
+            f"loss={self._config.training_strategy.clean_rgb_sra_loss_type}, "
             f"weight={self._config.training_strategy.clean_rgb_sra_loss_weight}"
         )
 
@@ -1245,6 +1246,7 @@ class LtxvTrainer:
                 "clean_rgb_sra_hidden_layer": int(self._config.training_strategy.clean_rgb_sra_hidden_layer),
                 "clean_rgb_sra_hidden_dim": self._config.training_strategy.clean_rgb_sra_hidden_dim,
                 "clean_rgb_sra_num_layers": int(self._config.training_strategy.clean_rgb_sra_num_layers),
+                "clean_rgb_sra_loss_type": self._config.training_strategy.clean_rgb_sra_loss_type,
             },
         }
         path = save_dir / f"clean_rgb_sra_head_step_{self._global_step:05d}.pt"

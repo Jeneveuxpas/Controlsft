@@ -33,6 +33,7 @@ Before diving into individual modes, here are the core ideas behind the flexible
 | **V2V IC-LoRA**       | Generated | —         | `reference`         | [`v2v_ic_lora`](../configs/v2v_ic_lora.yaml) |
 | **Part16 V2V Full Baseline** | Generated | —  | `reference`         | [`v2v_part16_full_baseline`](../configs/v2v_part16_full_baseline.yaml) |
 | **Part16 Stage-1 SRA Ablation** | Generated | — | `reference` | [`baseline`](../configs/ablations/part16_stage1_baseline.yaml), [`MLP-3`](../configs/ablations/part16_stage1_sra_mlp3_layer16.yaml), [`MLP-5`](../configs/ablations/part16_stage1_sra_mlp5_layer16.yaml), [`MLP-8`](../configs/ablations/part16_stage1_sra_mlp8_layer16.yaml) |
+| **Part16 Stage-2 Ablation** | Generated | — | `reference` / — | [`layer-8`](../configs/ablations/part16_stage2_sra_mlp5_layer8.yaml), [`layer-24`](../configs/ablations/part16_stage2_sra_mlp5_layer24.yaml), [`layer-16 cosine`](../configs/ablations/part16_stage2_sra_mlp5_layer16_cosine.yaml), [`pure SFT`](../configs/ablations/part16_stage2_pure_sft.yaml) |
 | **A2V**               | Generated | Frozen    | —                   | [`a2v_lora`](../configs/a2v_lora.yaml) |
 | **V2A (Foley)**       | Frozen    | Generated | —                   | [`v2a_lora`](../configs/v2a_lora.yaml) |
 | **Video Inpainting**  | Generated | —         | `mask`              | [`video_inpainting_lora`](../configs/video_inpainting_lora.yaml) |
@@ -149,6 +150,11 @@ training_strategy:
 The matched Part16 stage-1 configs in [`configs/ablations`](../configs/ablations) compare no-SRA baseline against
 3-, 5-, and 8-linear-layer SRA projectors. All SRA variants align the 1-based transformer layer 16 and keep the
 dataset, seed, optimizer, learning-rate schedule, and effective global batch size fixed.
+
+The matched Part16 stage-2 configs fix the SRA projector at five linear layers. They compare 1-based transformer
+layers 8 and 24 using Smooth L1, layer 16 using cosine distance, and a pure-SFT control with neither reference
+conditioning nor clean-x0 alignment. The four configs otherwise use the same data, initialization, optimizer,
+schedule, seed, global batch size, and checkpoint policy.
 
 ### Dataset Requirements
 

@@ -220,6 +220,23 @@ training_strategy:
 > The legacy `text_to_video` and `video_to_video` strategies are deprecated but remain forward-compatible.
 > New configs should use `name: "flexible"`.
 
+**Clean RGB SRA parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `clean_rgb_sra_loss_weight` | Auxiliary SRA loss multiplier. Set to `0.0` to disable the SRA head. |
+| `clean_rgb_sra_learning_rate` | Optional learning rate for the SRA head parameter group. |
+| `clean_rgb_sra_hidden_layer` | One-based transformer block whose video hidden states feed the SRA head. |
+| `clean_rgb_sra_hidden_dim` | Hidden width of the SRA projector. |
+| `clean_rgb_sra_num_layers` | Number of linear layers in the SRA projector; must be at least 2. |
+| `clean_rgb_sra_warmup_steps` | Linear warmup steps for the auxiliary loss weight. |
+| `clean_rgb_sra_loss_type` | Alignment loss: `smooth_l1` (default) or `cosine`. |
+| `clean_rgb_sra_beta` | Smooth L1 beta; used only when `clean_rgb_sra_loss_type: smooth_l1`. |
+
+Both loss types align only generated target-video tokens against detached clean video latents. Reference/control
+tokens remain excluded by the video loss mask. To run pure SFT without control or x0 alignment, use
+`video.conditions: []` together with `clean_rgb_sra_loss_weight: 0.0`.
+
 ### OptimizationConfig
 
 Training optimization parameters including learning rates, batch sizes, and schedulers.

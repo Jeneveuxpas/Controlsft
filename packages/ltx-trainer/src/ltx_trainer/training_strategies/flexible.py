@@ -180,6 +180,10 @@ class FlexibleStrategyConfig(TrainingStrategyConfigBase):
     clean_rgb_sra_hidden_dim: int | None = Field(default=None, gt=0)
     clean_rgb_sra_num_layers: int = Field(default=5, ge=2)
     clean_rgb_sra_warmup_steps: int = Field(default=100, ge=0)
+    clean_rgb_sra_loss_type: Literal["smooth_l1", "cosine"] = Field(
+        default="smooth_l1",
+        description="Loss used to align SRA predictions with detached clean video latents",
+    )
     clean_rgb_sra_beta: float = Field(default=0.05, gt=0.0)
 
     @model_validator(mode="after")
@@ -341,9 +345,15 @@ class FlexibleStrategy(TrainingStrategy):
                 f"Clean RGB SRA prediction shape {tuple(clean_rgb_pred.shape)} "
                 f"does not match target shape {tuple(target.shape)}"
             )
-        token_loss = torch.nn.functional.smooth_l1_loss(
-            clean_rgb_pred.float(), target, reduction="none", beta=float(self.config.clean_rgb_sra_beta)
-        ).mean(dim=-1)
+        prediction = clean_rgb_pred.float()
+        if self.config.clean_rgb_sra_loss_type == "cosine":
+            # Direction-only alignment is intentionally different from x0 regression:
+            # latent magnitude is ignored while token masking and loss weighting stay unchanged.
+            token_loss = 1.0 - torch.nn.functional.cosine_similarity(prediction, target, dim=-1)
+        else:
+            token_loss = torch.nn.functional.smooth_l1_loss(
+                prediction, target, reduction="none", beta=float(self.config.clean_rgb_sra_beta)
+            ).mean(dim=-1)
         if inputs.video_loss_mask is None or inputs.video_target_start_index is None:
             raise ValueError("Clean RGB SRA requires the target video loss mask")
         target_mask = inputs.video_loss_mask[:, inputs.video_target_start_index :].to(token_loss.device).float()

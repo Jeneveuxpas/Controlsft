@@ -100,3 +100,35 @@ def test_clean_rgb_sra_uses_detached_clean_x0_and_warmup() -> None:
     assert torch.allclose(loss, torch.full((2,), 0.004875))
     assert torch.allclose(metrics["train/clean_rgb_sra_raw"], torch.tensor(0.975))
     assert torch.allclose(metrics["train/clean_rgb_sra_weight"], torch.tensor(0.005))
+
+
+def test_clean_rgb_sra_cosine_loss_masks_tokens_and_detaches_target() -> None:
+    strategy = FlexibleStrategy(
+        FlexibleStrategyConfig(
+            video=ModalityConfig(is_generated=True, latents_dir="latents"),
+            clean_rgb_sra_loss_weight=0.25,
+            clean_rgb_sra_warmup_steps=0,
+            clean_rgb_sra_loss_type="cosine",
+        )
+    )
+    clean_x0 = torch.tensor([[[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]]], requires_grad=True)
+    prediction = torch.tensor([[[1.0, 0.0], [1.0, 0.0], [-1.0, 0.0]]], requires_grad=True)
+    inputs = ModelInputs(
+        video=None,
+        audio=None,
+        video_targets=None,
+        audio_targets=None,
+        video_loss_mask=torch.tensor([[False, False, True, False, True]]),
+        audio_loss_mask=None,
+        video_clean_latents=clean_x0,
+        video_target_start_index=2,
+    )
+
+    loss, metrics = strategy.compute_clean_rgb_sra_loss(prediction, inputs, global_step=0)
+    loss.mean().backward()
+
+    assert prediction.grad is not None
+    assert clean_x0.grad is None
+    assert torch.allclose(loss, torch.tensor([0.25]))
+    assert torch.allclose(metrics["train/clean_rgb_sra_raw"], torch.tensor(1.0))
+    assert torch.allclose(metrics["train/clean_rgb_sra_weight"], torch.tensor(0.25))
