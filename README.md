@@ -98,19 +98,6 @@ W&B 新增 `train/clean_rgb_sra_raw`、`train/clean_rgb_sra_loss` 和
 四组配置都是 1000 optimizer steps、effective global batch size 128、constant LR、
 `shifted_logit_normal` timestep sampling，并使用 4 节点、32 GPU FULL_SHARD FSDP。
 
-单机启动示例：
-
-```bash
-cd packages/ltx-trainer
-uv run accelerate launch scripts/train.py configs/ablations/part16_stage1_baseline.yaml
-```
-
-4 节点启动时，在四台机器上使用同一 `RUN_ID` 执行：
-
-```bash
-scripts/launch_4node_fsdp.sh baseline_001 configs/ablations/part16_stage1_baseline.yaml
-```
-
 ### Stage-2：对齐层、loss 与 Pure SFT
 
 Stage-2 固定 SRA projector 为 5 层、hidden dim 为 1024，实验如下：
@@ -138,17 +125,6 @@ SRA head。No-control SFT + SRA 同样设置 `video.conditions: []`，不会读�
 transformer 输入 `reference_latents`，但会在第 16 层使用 5 层 SRA head，以主视频自身的
 clean x0 latent 作为 Smooth L1 监督目标。Cosine 组当前先保留 weight 0.1 做短跑尺度检查；应在 100-step warmup 完成后观察
 `clean_rgb_sra_loss / denoising_loss`，再决定是否降低权重。
-
-四机启动模板（同一任务的四个节点使用相同 RUN_ID 和命令）：
-
-```bash
-packages/ltx-trainer/scripts/launch_4node_fsdp.sh \
-  <unique_run_id> \
-  packages/ltx-trainer/configs/ablations/<stage2_config>.yaml
-```
-
-平台 Start Command 建议写成一行，并为每个实验使用不同 RUN_ID；启动器会自动分配
-machine rank，并使用平台提供的 `MASTER_PORT`（未提供时默认为 2345）。
 
 ## 单 Part16 控制推理
 
@@ -203,7 +179,6 @@ uv run python scripts/infer_part16_precomputed.py \
 | [validation_runner.py](packages/ltx-trainer/src/ltx_trainer/validation_runner.py) | validation reference 布局与训练对齐 |
 | [infer_part16_control.py](packages/ltx-trainer/scripts/infer_part16_control.py) | 单 Part16 全量 checkpoint 推理 |
 | [infer_part16_precomputed.py](packages/ltx-trainer/scripts/infer_part16_precomputed.py) | 从 signal latent + TE 批量推理 |
-| [launch_4node_fsdp.sh](packages/ltx-trainer/scripts/launch_4node_fsdp.sh) | 4 节点 FSDP 启动 |
 
 查看相对官方基线的全部变更：
 
