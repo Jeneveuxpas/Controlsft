@@ -35,7 +35,9 @@ class UniformTimestepSampler(TimestepSampler):
         self.min_value = min_value
         self.max_value = max_value
 
-    def sample(self, batch_size: int, seq_length: int | None = None, device: torch.device = None) -> torch.Tensor:  # noqa: ARG002
+    def sample(  # noqa: ARG002
+        self, batch_size: int, seq_length: int | None = None, device: torch.device = None
+    ) -> torch.Tensor:
         return torch.rand(batch_size, device=device) * (self.max_value - self.min_value) + self.min_value
 
     def sample_for(self, batch: torch.Tensor) -> torch.Tensor:
@@ -51,13 +53,27 @@ class ShiftedLogitNormalTimestepSampler(TimestepSampler):
     where the shift is determined by the sequence length.
     The stretching normalizes samples between percentile bounds to ensure
     the distribution covers [0, 1] more evenly. A uniform fallback prevents
-    collapse at high token counts.
+    collapse at high token counts. An optional high-noise override supports
+    the low-SNR coverage experiment used for Self-Flow video training.
     """
 
-    def __init__(self, std: float = 1.0, eps: float = 1e-3, uniform_prob: float = 0.1):
+    def __init__(
+        self,
+        std: float = 1.0,
+        eps: float = 1e-3,
+        uniform_prob: float = 0.1,
+        high_noise_probability: float = 0.0,
+        high_noise_min: float = 0.95,
+    ):
+        if not 0.0 <= high_noise_probability <= 1.0:
+            raise ValueError("high_noise_probability must be in [0, 1]")
+        if not 0.0 <= high_noise_min < 1.0:
+            raise ValueError("high_noise_min must be in [0, 1)")
         self.std = std
         self.eps = eps
         self.uniform_prob = uniform_prob
+        self.high_noise_probability = high_noise_probability
+        self.high_noise_min = high_noise_min
         # Percentile values for stretching (scaled by std)
         # 99.9th percentile of standard normal ≈ 3.0902
         # 0.5th percentile of standard normal ≈ -2.5758
@@ -99,7 +115,14 @@ class ShiftedLogitNormalTimestepSampler(TimestepSampler):
         uniform = (1 - self.eps) * torch.rand((batch_size,), device=device) + self.eps
         prob = torch.rand((batch_size,), device=device)
 
-        return torch.where(prob > self.uniform_prob, stretched_logit, uniform)
+        sampled = torch.where(prob > self.uniform_prob, stretched_logit, uniform)
+        if self.high_noise_probability > 0.0:
+            high_noise = self.high_noise_min + (1.0 - self.high_noise_min) * torch.rand(
+                (batch_size,), device=device
+            )
+            use_high_noise = torch.rand((batch_size,), device=device) < self.high_noise_probability
+            sampled = torch.where(use_high_noise, high_noise, sampled)
+        return sampled
 
     def sample_for(self, batch: torch.Tensor) -> torch.Tensor:
         """Sample timesteps for a specific batch tensor.

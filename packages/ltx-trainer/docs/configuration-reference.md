@@ -237,6 +237,52 @@ Both loss types align only generated target-video tokens against detached clean 
 tokens remain excluded by the video loss mask. To run pure SFT without control or x0 alignment, use
 `video.conditions: []` together with `clean_rgb_sra_loss_weight: 0.0`.
 
+**Representation distillation:**
+
+`representation_distillation` enables a frozen full-model teacher while the student remains unconditioned. Teacher
+references are declared separately so their latent directories are loaded without being prepended to student tokens.
+The current implementation is video-only, requires `model.training_mode: full`, requires empty student
+`video.conditions`, and cannot be combined with Clean RGB SRA. Omit the entire block to disable distillation.
+
+| Parameter | Description |
+|-----------|-------------|
+| `teacher_checkpoint` | Full teacher checkpoint; defaults to `model.load_checkpoint`. |
+| `teacher_conditions` | Deterministic (`probability: 1.0`) reference conditions visible only to the teacher. |
+| `student_hidden_layer` | One-based student block used for feature prediction. |
+| `teacher_hidden_layer` | One-based teacher block used as the detached target. |
+| `projector` | `none` for direct alignment or `mlp` for `Linear-SiLU-Linear` student projection. |
+| `projector_hidden_dim` | Bottleneck width of the student MLP projector. |
+| `projector_learning_rate` | Optional separate learning rate for the projector. |
+| `loss_type` | `cosine` (default), `l1`, or `l2`. L1/L2 average over the hidden dimension per token. |
+| `loss_weight` | Representation-loss multiplier. Retune it when changing loss type because scales differ. |
+| `warmup_steps` | Linear warmup steps for the representation-loss weight. |
+| `noise_mode` | `same`, `teacher_cleaner`, or `self_flow`. |
+| `second_timestep_probability` | Token fraction assigned timestep `s` in `self_flow`; use `0.1` for video. |
+
+In `self_flow` mode, `t` and `s` are sampled independently from the configured flow-matching distribution. Student
+target tokens use token-wise `t/s`, while the teacher target uses uniform `min(t,s)`. Both views share the same clean
+latent and Gaussian noise. LTX-2.3 still needs one scalar prompt timestep, so the student uses base `t` for `sigma`
+while retaining token-wise values in `timesteps`.
+
+Set `teacher_checkpoint` explicitly for resumable runs. The fallback to `model.load_checkpoint` is convenient for the
+initial student initialization, but on resume that model path normally changes to a student checkpoint and must not
+silently replace the fixed condition teacher.
+
+The teacher is a fixed BF16 model replicated in full on every rank; it is not FSDP-sharded, optimized, or saved in
+student checkpoints. Budget GPU memory and per-node checkpoint-loading CPU RAM accordingly. This differs from the
+EMA teacher in the Self-Flow paper. For `self_flow`, LTX video AdaLN receives token-wise `t/s`, while LTX-2.3 prompt
+AdaLN keeps the sample-level base `t`. Dynamic forward hooks are incompatible with `torch.compile`; the trainer rejects
+that combination at startup, so use the regular FSDP config. Custom FSDP configs must keep
+`fsdp_use_orig_params: true`, matching the checked-in Accelerate configs, because the projector parameter groups are
+constructed around original parameter objects. Resume state also fingerprints the complete distillation block and
+falls back to step 0 if its teacher, layers, projector, loss, or noise settings changed.
+
+The shifted-logit-normal sampler also accepts `high_noise_probability` and `high_noise_min`. The Self-Flow video
+appendix evaluates `0.05` and `0.95`, respectively. Its scheduler does not include Controlsft's existing full-range
+uniform fallback, so exact reproduction additionally requires `uniform_prob: 0.0`. These settings change the base
+timestep distribution and therefore must be applied to every compared baseline, not only the distillation run;
+defaults (`0.0`, `0.95`) preserve existing behavior.
+
 ### OptimizationConfig
 
 Training optimization parameters including learning rates, batch sizes, and schedulers.

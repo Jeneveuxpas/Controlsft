@@ -4,7 +4,8 @@ This package provides tools and scripts for training and fine-tuning
 Lightricks' **LTX-2** audio-video generation model. It supports LoRA training, full
 fine-tuning, and a flexible conditioning framework covering text-to-video, text-to-audio, image-to-video,
 video extension, audio extension, video inpainting, audio inpainting, video outpainting, IC-LoRA for video, audio, and joint
-audio-video references, audio-to-video, and video-to-audio.
+audio-video references, audio-to-video, and video-to-audio. This fork also includes Clean RGB SRA and frozen
+condition-teacher → unconditioned-student representation distillation for Part16 research.
 
 ---
 
@@ -56,8 +57,17 @@ uv run python scripts/infer_part16_control.py \
   --output-path outputs/part16_result.mp4
 ```
 
-The script ignores the training-only Clean RGB SRA head. Match output dimensions and reference scale factors to
-training; add `--include-control` for a side-by-side control/generated video.
+The trainer-side inference loaders ignore training-only Clean RGB SRA and representation-distillation heads. Match
+output dimensions and reference scale factors to training; add `--include-control` for a side-by-side
+control/generated video. Distilled students are trained without reference tokens and should normally be evaluated
+as unconditioned-student/T2V models rather than through the Part16 control interface.
+
+### Part16 research extensions
+
+The implementation and experiment matrix are documented in the repository [README](../../README.md). The five
+teacher/student configs are indexed in [configs/README.md](configs/README.md), and every student is initialized from
+the condition-teacher checkpoint while the frozen teacher remains explicit and separate. This path is video-only,
+requires full fine-tuning, and is a Self-Flow-inspired LTX adaptation rather than an EMA Self-Flow reproduction.
 
 ---
 

@@ -50,6 +50,7 @@ packages/ltx-trainer/
 │   ├── config.py                 # Pydantic configuration models
 │   ├── config_display.py         # Config pretty-printing
 │   ├── trainer.py                # Main training orchestration with Accelerate
+│   ├── distillation.py           # Student projection head and representation losses
 │   ├── model_loader.py           # Model loading using ltx-core
 │   ├── validation_runner.py      # ValidationRunner — conditioned validation sampling
 │   ├── datasets.py               # PrecomputedDataset, DummyDataset
@@ -84,7 +85,8 @@ packages/ltx-trainer/
 │   ├── i2v_lora.yaml             # Image-to-video LoRA
 │   ├── v2v_ic_lora.yaml          # IC-LoRA video-to-video
 │   ├── v2v_part16_full_baseline.yaml # Part16 full fine-tuning baseline without SRA
-│   ├── ablations/                # Matched Part16 baseline and SRA experiment configs
+│   ├── ablations/                # Matched Part16 baseline, SRA, and distillation configs
+│   │   └── part16_stage2_distill_[a-e]_*.yaml # Frozen condition-teacher distillation matrix
 │   ├── a2v_lora.yaml             # Audio-to-video LoRA
 │   ├── v2a_lora.yaml             # Video-to-audio LoRA
 │   ├── video_extend_lora.yaml    # Video extension (forward)

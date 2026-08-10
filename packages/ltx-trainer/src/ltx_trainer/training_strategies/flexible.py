@@ -149,6 +149,46 @@ class ModalityConfig(BaseModel):
     )
 
 
+class RepresentationDistillationConfig(BaseModel):
+    """Frozen-teacher feature distillation with optional Self-Flow noising."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    teacher_checkpoint: str | None = Field(
+        default=None,
+        description="Full-model teacher checkpoint. Defaults to model.load_checkpoint when omitted.",
+    )
+    teacher_conditions: list[ReferenceConditionConfig] = Field(
+        default_factory=list,
+        description="Reference conditions visible to the teacher but not the student.",
+    )
+    student_hidden_layer: int = Field(default=16, ge=1, description="One-based student transformer block number")
+    teacher_hidden_layer: int = Field(default=34, ge=1, description="One-based teacher transformer block number")
+    projector: Literal["none", "mlp"] = Field(default="mlp")
+    projector_hidden_dim: int = Field(
+        default=1024,
+        gt=0,
+        description="Hidden width of the two-linear-layer student projector",
+    )
+    projector_learning_rate: float | None = Field(default=None, gt=0.0)
+    loss_type: Literal["cosine", "l1", "l2"] = Field(
+        default="cosine",
+        description="Feature loss; cosine is preferred for cross-layer alignment",
+    )
+    loss_weight: float = Field(default=0.8, gt=0.0)
+    warmup_steps: int = Field(default=0, ge=0)
+    noise_mode: Literal["same", "teacher_cleaner", "self_flow"] = Field(
+        default="same",
+        description="same: shared t; teacher_cleaner: teacher min(t,s); self_flow: token-wise student t/s",
+    )
+    second_timestep_probability: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=0.5,
+        description="Self-Flow token ratio using s; the paper uses 0.1 for video",
+    )
+
+
 class FlexibleStrategyConfig(TrainingStrategyConfigBase):
     """Configuration for the flexible training strategy.
     This strategy supports all conditioning scenarios through configuration:
@@ -185,6 +225,7 @@ class FlexibleStrategyConfig(TrainingStrategyConfigBase):
         description="Loss used to align SRA predictions with detached clean video latents",
     )
     clean_rgb_sra_beta: float = Field(default=0.05, gt=0.0)
+    representation_distillation: RepresentationDistillationConfig | None = Field(default=None)
 
     @model_validator(mode="after")
     def validate_at_least_one_generated(self) -> "FlexibleStrategyConfig":
@@ -208,6 +249,26 @@ class FlexibleStrategyConfig(TrainingStrategyConfigBase):
                 )
         return self
 
+    @model_validator(mode="after")
+    def validate_representation_distillation(self) -> "FlexibleStrategyConfig":
+        distillation = self.representation_distillation
+        if distillation is None:
+            return self
+        if self.video is None or not self.video.is_generated:
+            raise ValueError("Representation distillation requires a generated video modality")
+        if self.audio is not None:
+            raise ValueError("Representation distillation currently supports video-only training")
+        if self.video.conditions:
+            raise ValueError(
+                "The distilled student must not have video conditions; put teacher-only references under "
+                "representation_distillation.teacher_conditions"
+            )
+        if any(condition.probability != 1.0 for condition in distillation.teacher_conditions):
+            raise ValueError("Teacher reference conditions must use probability=1.0 for deterministic pairing")
+        if self.clean_rgb_sra_loss_weight > 0.0:
+            raise ValueError("Clean RGB SRA and representation distillation cannot be enabled together")
+        return self
+
     def get_data_sources(self) -> dict[str, str]:
         """Dynamically determine required data sources from config.
         Returns a mapping of directory name (under ``preprocessed_data_root``) to
@@ -229,6 +290,10 @@ class FlexibleStrategyConfig(TrainingStrategyConfigBase):
                 elif isinstance(cond, MaskConditionConfig):
                     sources[cond.mask_dir] = cond.mask_dir
 
+        if self.representation_distillation is not None:
+            for condition in self.representation_distillation.teacher_conditions:
+                sources[condition.latents_dir] = condition.latents_dir
+
         return sources
 
 
@@ -246,6 +311,28 @@ class ModalityProcessingResult:
     loss_mask: Tensor | None
     clean_latents: Tensor | None = None
     target_start_index: int | None = None
+
+
+@dataclass
+class InitializedTarget:
+    """A precomputed noisy view of one clean target sequence."""
+
+    noisy_latents: Tensor
+    targets: Tensor
+    timesteps: Tensor
+    loss_mask: Tensor
+    sigmas: Tensor
+
+
+@dataclass
+class DistillationModelInputs:
+    """Paired student and teacher inputs derived from the same clean sample and noise."""
+
+    student: ModelInputs
+    teacher: ModelInputs
+    base_sigmas: Tensor
+    second_sigmas: Tensor | None
+    second_timestep_mask: Tensor | None
 
 
 @dataclass
@@ -292,6 +379,54 @@ class FlexibleStrategy(TrainingStrategy):
         video_result = self._process_modality(self.config.video, batch, "video", timestep_sampler)
         audio_result = self._process_modality(self.config.audio, batch, "audio", timestep_sampler)
 
+        return self._to_model_inputs(video_result, audio_result)
+
+    def prepare_distillation_inputs(
+        self,
+        batch: dict[str, Any],
+        timestep_sampler: TimestepSampler,
+    ) -> DistillationModelInputs:
+        """Build paired video inputs with one shared clean target and Gaussian noise."""
+        distillation = self.config.representation_distillation
+        video_config = self.config.video
+        if distillation is None or video_config is None:
+            raise ValueError("Representation distillation is not configured")
+
+        data = self._patchify_latent_data(batch["video_latents"], "video")
+        student_target, teacher_target, second_sigmas, second_mask = self._initialize_distillation_targets(
+            data.latents,
+            timestep_sampler,
+            noise_mode=distillation.noise_mode,
+            second_timestep_probability=distillation.second_timestep_probability,
+        )
+        teacher_config = video_config.model_copy(update={"conditions": list(distillation.teacher_conditions)})
+        student_result = self._process_modality_data(
+            video_config,
+            batch,
+            "video",
+            data,
+            initialized_target=student_target,
+        )
+        teacher_result = self._process_modality_data(
+            teacher_config,
+            batch,
+            "video",
+            data,
+            initialized_target=teacher_target,
+        )
+        return DistillationModelInputs(
+            student=self._to_model_inputs(student_result, None),
+            teacher=self._to_model_inputs(teacher_result, None),
+            base_sigmas=student_target.sigmas,
+            second_sigmas=second_sigmas,
+            second_timestep_mask=second_mask,
+        )
+
+    @staticmethod
+    def _to_model_inputs(
+        video_result: ModalityProcessingResult | None,
+        audio_result: ModalityProcessingResult | None,
+    ) -> ModelInputs:
         return ModelInputs(
             video=video_result.modality if video_result else None,
             audio=audio_result.modality if audio_result else None,
@@ -386,7 +521,10 @@ class FlexibleStrategy(TrainingStrategy):
         """Infer spatial and temporal scale factors by peeking at one sample pair."""
         if self.config.video is None:
             return None, None
-        for cond in self.config.video.conditions:
+        conditions: list[ConditionConfig] = list(self.config.video.conditions)
+        if self.config.representation_distillation is not None:
+            conditions.extend(self.config.representation_distillation.teacher_conditions)
+        for cond in conditions:
             if not isinstance(cond, ReferenceConditionConfig):
                 continue
             target_dir = Path(self.config.video.latents_dir)
@@ -423,8 +561,19 @@ class FlexibleStrategy(TrainingStrategy):
         if modality_config is None:
             return None
 
-        # Step 1: Load and patchify latents
         data = self._patchify_latent_data(batch[f"{modality_key}_latents"], modality_key)
+        return self._process_modality_data(modality_config, batch, modality_key, data, timestep_sampler)
+
+    def _process_modality_data(
+        self,
+        modality_config: ModalityConfig,
+        batch: dict[str, Any],
+        modality_key: str,
+        data: LatentData,
+        timestep_sampler: TimestepSampler | None = None,
+        initialized_target: InitializedTarget | None = None,
+    ) -> ModalityProcessingResult:
+        """Build a modality from patchified data and an optional precomputed noisy target."""
         latents = data.latents
         clean_target_latents = latents if modality_config.is_generated and modality_key == "video" else None
 
@@ -439,9 +588,18 @@ class FlexibleStrategy(TrainingStrategy):
 
         # Step 3: Initialize noise, timesteps, and loss mask based on is_generated flag
         if modality_config.is_generated:
-            noisy_latents, targets, timesteps, loss_mask, sigmas = self._initialize_noisy_target(
-                latents, timestep_sampler
-            )
+            if initialized_target is None:
+                if timestep_sampler is None:
+                    raise ValueError("A timestep sampler is required when no initialized target is provided")
+                noisy_latents, targets, timesteps, loss_mask, sigmas = self._initialize_noisy_target(
+                    latents, timestep_sampler
+                )
+            else:
+                noisy_latents = initialized_target.noisy_latents
+                targets = initialized_target.targets
+                timesteps = initialized_target.timesteps
+                loss_mask = initialized_target.loss_mask
+                sigmas = initialized_target.sigmas
         else:
             # Conditioning modality: keep clean (sigma=0), no loss
             noisy_latents = latents
@@ -529,6 +687,58 @@ class FlexibleStrategy(TrainingStrategy):
         timesteps = sigmas.view(-1, 1).expand(batch_size, seq_len).clone()
         loss_mask = torch.ones(batch_size, seq_len, dtype=torch.bool, device=latents.device)
         return noisy_latents, targets, timesteps, loss_mask, sigmas
+
+    @staticmethod
+    def _initialize_distillation_targets(
+        latents: Tensor,
+        timestep_sampler: TimestepSampler,
+        *,
+        noise_mode: Literal["same", "teacher_cleaner", "self_flow"],
+        second_timestep_probability: float,
+    ) -> tuple[InitializedTarget, InitializedTarget, Tensor | None, Tensor | None]:
+        """Construct student/teacher views using the same x0 and Gaussian noise."""
+        batch_size, seq_len, _ = latents.shape
+        base_sigmas = timestep_sampler.sample_for(latents)
+        noise = torch.randn_like(latents)
+        targets = noise - latents
+        loss_mask = torch.ones(batch_size, seq_len, dtype=torch.bool, device=latents.device)
+        base_timesteps = base_sigmas[:, None].expand(batch_size, seq_len).clone()
+
+        second_sigmas = None
+        second_mask = None
+        student_timesteps = base_timesteps
+        teacher_sigmas = base_sigmas
+        if noise_mode != "same":
+            second_sigmas = timestep_sampler.sample_for(latents)
+            teacher_sigmas = torch.minimum(base_sigmas, second_sigmas)
+            if noise_mode == "self_flow":
+                second_mask = torch.rand(batch_size, seq_len, device=latents.device) < second_timestep_probability
+                second_timesteps = second_sigmas[:, None].expand(batch_size, seq_len)
+                student_timesteps = torch.where(second_mask, second_timesteps, base_timesteps)
+
+        teacher_timesteps = teacher_sigmas[:, None].expand(batch_size, seq_len).clone()
+        student_tau = student_timesteps.unsqueeze(-1)
+        teacher_tau = teacher_timesteps.unsqueeze(-1)
+        student_noisy = ((1 - student_tau) * latents + student_tau * noise).to(dtype=latents.dtype)
+        teacher_noisy = ((1 - teacher_tau) * latents + teacher_tau * noise).to(dtype=latents.dtype)
+
+        student = InitializedTarget(
+            noisy_latents=student_noisy,
+            targets=targets,
+            timesteps=student_timesteps,
+            loss_mask=loss_mask,
+            # LTX-2.3 prompt AdaLN requires one scalar. Keep the base timestep because
+            # most video tokens use t and uniform-timestep inference also conditions on t.
+            sigmas=base_sigmas,
+        )
+        teacher = InitializedTarget(
+            noisy_latents=teacher_noisy,
+            targets=targets.clone(),
+            timesteps=teacher_timesteps,
+            loss_mask=loss_mask.clone(),
+            sigmas=teacher_sigmas,
+        )
+        return student, teacher, second_sigmas, second_mask
 
     def _apply_intrinsic_condition(
         self,

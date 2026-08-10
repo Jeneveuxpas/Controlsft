@@ -16,7 +16,11 @@ from ltx_trainer.training_strategies.base_strategy import (
     TrainingStrategy,
     TrainingStrategyConfigBase,
 )
-from ltx_trainer.training_strategies.flexible import FlexibleStrategy, FlexibleStrategyConfig
+from ltx_trainer.training_strategies.flexible import (
+    FlexibleStrategy,
+    FlexibleStrategyConfig,
+    RepresentationDistillationConfig,
+)
 from ltx_trainer.training_strategies.text_to_video import TextToVideoConfig, TextToVideoStrategy
 from ltx_trainer.training_strategies.video_to_video import VideoToVideoConfig, VideoToVideoStrategy
 
@@ -29,6 +33,7 @@ __all__ = [
     "FlexibleStrategy",
     "FlexibleStrategyConfig",
     "ModelInputs",
+    "RepresentationDistillationConfig",
     "TextToVideoConfig",
     "TextToVideoStrategy",
     "TrainingStrategy",

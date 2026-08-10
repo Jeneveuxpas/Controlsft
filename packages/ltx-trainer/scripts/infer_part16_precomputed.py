@@ -206,7 +206,12 @@ def load_finetuned_transformer(
 ) -> torch.nn.Module:
     transformer = load_transformer(base_checkpoint, device=device, dtype=torch.bfloat16)
     state_dict = load_file(trained_checkpoint, device="cpu")
-    inference_state = {name: value for name, value in state_dict.items() if "clean_rgb_sra_head." not in name}
+    training_only_markers = ("clean_rgb_sra_head.", "representation_distillation_head.")
+    inference_state = {
+        name: value
+        for name, value in state_dict.items()
+        if not any(marker in name for marker in training_only_markers)
+    }
     incompatible = transformer.load_state_dict(inference_state, strict=False)
     if incompatible.missing_keys or incompatible.unexpected_keys:
         raise RuntimeError(

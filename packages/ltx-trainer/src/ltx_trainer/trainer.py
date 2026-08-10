@@ -39,6 +39,7 @@ from ltx_trainer import logger
 from ltx_trainer.config import LtxTrainerConfig
 from ltx_trainer.config_display import print_config
 from ltx_trainer.datasets import PrecomputedDataset
+from ltx_trainer.distillation import RepresentationProjectionHead, compute_representation_distillation_loss
 from ltx_trainer.gpu_utils import free_gpu_memory, get_gpu_memory_gb
 from ltx_trainer.hf_hub_utils import push_to_hub
 from ltx_trainer.model_loader import load_embeddings_processor, load_transformer
@@ -113,7 +114,9 @@ class LtxvTrainer:
         self._setup_accelerator()
         self._collect_trainable_params()
         self._setup_clean_rgb_sra_head()
+        self._setup_representation_distillation_head()
         self._load_clean_rgb_sra_checkpoint()
+        self._teacher_transformer: torch.nn.Module | None = None
         self._loaded_checkpoint_path: Path | None = None
         self._load_checkpoint()
         self._prepare_models_for_training()
@@ -315,6 +318,10 @@ class LtxvTrainer:
                         }
                         if self._clean_rgb_sra_enabled() and len(self._optimizer.param_groups) > 1:
                             metrics["train/sra_learning_rate"] = self._optimizer.param_groups[1]["lr"]
+                        if self._representation_distillation_enabled() and len(self._optimizer.param_groups) > 1:
+                            metrics["train/distillation_projector_learning_rate"] = self._optimizer.param_groups[1][
+                                "lr"
+                            ]
                         metrics.update(self._sigma_tracker.get_metrics())
                         self._log_metrics(metrics)
 
@@ -390,7 +397,9 @@ class LtxvTrainer:
 
         return saved_path, stats
 
-    def _training_step(self, batch: dict[str, dict[str, Tensor]]) -> TrainingStepOutput:
+    def _training_step(  # noqa: PLR0912, PLR0915
+        self, batch: dict[str, dict[str, Tensor]]
+    ) -> TrainingStepOutput:
         """Perform a single training step using the configured strategy."""
         # Apply embedding connectors to transform pre-computed text embeddings
         conditions = batch["conditions"]
@@ -414,15 +423,43 @@ class LtxvTrainer:
         conditions["audio_prompt_embeds"] = audio_embeds
         conditions["prompt_attention_mask"] = attention_mask
 
-        # Use strategy to prepare training inputs (returns ModelInputs with Modality objects)
-        model_inputs = self._training_strategy.prepare_training_inputs(batch, self._timestep_sampler)
+        distillation_inputs = None
+        teacher_target_hidden = None
+        if self._representation_distillation_enabled():
+            distillation_inputs = self._training_strategy.prepare_distillation_inputs(batch, self._timestep_sampler)
+            model_inputs = distillation_inputs.student
+            teacher_inputs = distillation_inputs.teacher
+            if self._teacher_transformer is None or teacher_inputs.video is None:
+                raise ValueError("Representation teacher and teacher video inputs must be available")
+            if teacher_inputs.video_target_start_index is None:
+                raise ValueError("Representation teacher input has no target token start index")
+            teacher_layer = int(self._config.training_strategy.representation_distillation.teacher_hidden_layer)
+            extract_hidden = self._find_model_attr(self._teacher_transformer, "extract_video_hidden")
+            if extract_hidden is None:
+                raise ValueError("Representation teacher does not support intermediate hidden extraction")
+            teacher_autocast = (
+                torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+                if self._accelerator.device.type == "cuda"
+                else contextlib.nullcontext()
+            )
+            with teacher_autocast:
+                teacher_hidden = extract_hidden(
+                    video=teacher_inputs.video,
+                    audio=teacher_inputs.audio,
+                    layer_number=teacher_layer,
+                )
+            teacher_target_hidden = teacher_hidden[:, teacher_inputs.video_target_start_index :, :].detach().clone()
+        else:
+            # Use strategy to prepare training inputs (returns ModelInputs with Modality objects)
+            model_inputs = self._training_strategy.prepare_training_inputs(batch, self._timestep_sampler)
 
         # Run the SRA head from the selected block hook. Under FSDP the head is
         # part of the root flat parameter, which is only materialized during the
         # transformer forward; calling it after the forward sees empty shards on
         # some ranks.
         captured_sra_prediction: dict[str, Tensor] = {}
-        hook_handle = None
+        captured_student_hidden: dict[str, Tensor] = {}
+        hook_handles: list[torch.utils.hooks.RemovableHandle] = []
         if self._clean_rgb_sra_enabled():
             if model_inputs.video_target_start_index is None:
                 raise ValueError("Clean RGB SRA requires the target token start index")
@@ -441,7 +478,31 @@ class LtxvTrainer:
                     target_hidden.to(device=head_param.device, dtype=head_param.dtype)
                 )
 
-            hook_handle = block.register_forward_hook(_run_sra_head)
+            hook_handles.append(block.register_forward_hook(_run_sra_head))
+        if self._representation_distillation_enabled():
+            if model_inputs.video_target_start_index is None:
+                raise ValueError("Representation student input has no target token start index")
+            config = self._config.training_strategy.representation_distillation
+            block = self._transformer_block(
+                self._transformer,
+                int(config.student_hidden_layer),
+                "representation_distillation.student_hidden_layer",
+            )
+            head = self._find_model_attr(self._transformer, "representation_distillation_head")
+            if config.projector == "mlp" and head is None:
+                raise ValueError("Representation distillation projector is not attached")
+
+            def _capture_student_hidden(_module, _inputs, output) -> None:
+                video_args = output[0]
+                if video_args is None:
+                    raise ValueError("Representation distillation block returned no video state")
+                target_hidden = video_args.x[:, model_inputs.video_target_start_index :, :]
+                if head is not None:
+                    head_param = next(head.parameters())
+                    target_hidden = head(target_hidden.to(device=head_param.device, dtype=head_param.dtype))
+                captured_student_hidden["video"] = target_hidden
+
+            hook_handles.append(block.register_forward_hook(_capture_student_hidden))
         try:
             video_pred, audio_pred = self._transformer(
                 video=model_inputs.video,
@@ -449,7 +510,7 @@ class LtxvTrainer:
                 perturbations=None,
             )
         finally:
-            if hook_handle is not None:
+            for hook_handle in hook_handles:
                 hook_handle.remove()
 
         # Official flow-matching loss remains unchanged.
@@ -464,6 +525,30 @@ class LtxvTrainer:
             )
             aux_metrics.update(sra_metrics)
             loss = loss + clean_rgb_sra_loss
+        if self._representation_distillation_enabled():
+            if "video" not in captured_student_hidden or teacher_target_hidden is None:
+                raise ValueError("Representation distillation did not capture both student and teacher hidden states")
+            if model_inputs.video_loss_mask is None:
+                raise ValueError("Representation distillation requires a video loss mask")
+            config = self._config.training_strategy.representation_distillation
+            student_hidden = captured_student_hidden["video"]
+            target_mask = model_inputs.video_loss_mask[:, -student_hidden.shape[1] :]
+            distillation_loss, distillation_metrics = compute_representation_distillation_loss(
+                student_hidden,
+                teacher_target_hidden,
+                target_mask,
+                loss_weight=float(config.loss_weight),
+                warmup_steps=int(config.warmup_steps),
+                global_step=self._global_step,
+                loss_type=config.loss_type,
+            )
+            aux_metrics.update(distillation_metrics)
+            aux_metrics["train/representation_teacher_sigma"] = distillation_inputs.teacher.video.sigma.mean()
+            if distillation_inputs.second_timestep_mask is not None:
+                aux_metrics["train/representation_second_timestep_fraction"] = (
+                    distillation_inputs.second_timestep_mask.float().mean()
+                )
+            loss = loss + distillation_loss
 
         # Sigma comes from whichever modality is generated (video preferred, else audio).
         if model_inputs.video is not None and model_inputs.video.enabled:
@@ -542,6 +627,9 @@ class LtxvTrainer:
     def _clean_rgb_sra_enabled(self) -> bool:
         return bool(getattr(self._config.training_strategy, "clean_rgb_sra_loss_weight", 0.0) > 0.0)
 
+    def _representation_distillation_enabled(self) -> bool:
+        return getattr(self._config.training_strategy, "representation_distillation", None) is not None
+
     @staticmethod
     def _iter_model_candidates(model: torch.nn.Module):
         queue = [model]
@@ -569,12 +657,15 @@ class LtxvTrainer:
         return None
 
     def _clean_rgb_sra_block(self) -> torch.nn.Module:
-        blocks = self._find_model_attr(self._transformer, "transformer_blocks")
         layer_number = int(self._config.training_strategy.clean_rgb_sra_hidden_layer)
+        return self._transformer_block(self._transformer, layer_number, "clean_rgb_sra_hidden_layer")
+
+    def _transformer_block(self, model: torch.nn.Module, layer_number: int, field_name: str) -> torch.nn.Module:
+        blocks = self._find_model_attr(model, "transformer_blocks")
         layer_index = layer_number - 1
         if blocks is None or not 0 <= layer_index < len(blocks):
             count = 0 if blocks is None else len(blocks)
-            raise ValueError(f"clean_rgb_sra_hidden_layer {layer_number} is outside 1..{count}")
+            raise ValueError(f"{field_name} {layer_number} is outside 1..{count}")
         return blocks[layer_index]
 
     def _setup_clean_rgb_sra_head(self) -> None:
@@ -606,6 +697,44 @@ class LtxvTrainer:
             f"projector_layers={num_layers}, "
             f"loss={self._config.training_strategy.clean_rgb_sra_loss_type}, "
             f"weight={self._config.training_strategy.clean_rgb_sra_loss_weight}"
+        )
+
+    def _setup_representation_distillation_head(self) -> None:
+        if not self._representation_distillation_enabled():
+            return
+        if self._config.model.training_mode != "full":
+            raise ValueError("Representation distillation currently requires model.training_mode='full'")
+
+        config = self._config.training_strategy.representation_distillation
+        self._transformer_block(
+            self._transformer,
+            int(config.student_hidden_layer),
+            "representation_distillation.student_hidden_layer",
+        )
+        self._transformer_block(
+            self._transformer,
+            int(config.teacher_hidden_layer),
+            "representation_distillation.teacher_hidden_layer",
+        )
+        if config.projector == "mlp":
+            base = (
+                self._transformer.get_base_model()
+                if hasattr(self._transformer, "get_base_model")
+                else self._transformer
+            )
+            head = RepresentationProjectionHead(
+                input_dim=int(base.inner_dim),
+                hidden_dim=int(config.projector_hidden_dim),
+            ).to(dtype=next(base.parameters()).dtype)
+            base.representation_distillation_head = head
+            head.requires_grad_(True)
+            self._trainable_params.extend(head.parameters())
+
+        logger.info(
+            "Enabled representation distillation: "
+            f"student_layer={config.student_hidden_layer}, teacher_layer={config.teacher_hidden_layer} (1-based), "
+            f"projector={config.projector}, loss={config.loss_type}, "
+            f"noise_mode={config.noise_mode}, weight={config.loss_weight}"
         )
 
     def _load_clean_rgb_sra_checkpoint(self) -> None:
@@ -666,15 +795,20 @@ class LtxvTrainer:
         incompatible = self._transformer.load_state_dict(state_dict, strict=False)
         missing = set(incompatible.missing_keys)
         unexpected = set(incompatible.unexpected_keys)
-        allowed_missing = {name for name in missing if "clean_rgb_sra_head." in name}
+        auxiliary_markers = ("clean_rgb_sra_head.", "representation_distillation_head.")
+        allowed_missing = {name for name in missing if any(marker in name for marker in auxiliary_markers)}
+        allowed_unexpected = {name for name in unexpected if any(marker in name for marker in auxiliary_markers)}
         invalid_missing = missing - allowed_missing
-        if invalid_missing or unexpected:
+        invalid_unexpected = unexpected - allowed_unexpected
+        if invalid_missing or invalid_unexpected:
             raise RuntimeError(
                 "Full checkpoint is incompatible with the model: "
-                f"missing={sorted(invalid_missing)}, unexpected={sorted(unexpected)}"
+                f"missing={sorted(invalid_missing)}, unexpected={sorted(invalid_unexpected)}"
             )
         if allowed_missing:
-            logger.info("Initial checkpoint has no Clean RGB SRA head; using a newly initialized head")
+            logger.info("Initial checkpoint has no configured auxiliary head; using a newly initialized head")
+        if allowed_unexpected:
+            logger.info("Initial checkpoint contains unused auxiliary heads; ignoring those training-only parameters")
 
         logger.info("✅ Full model checkpoint loaded successfully")
 
@@ -691,6 +825,50 @@ class LtxvTrainer:
         set_peft_model_state_dict(base_model, state_dict)
 
         logger.info("✅ LoRA checkpoint loaded successfully")
+
+    def _load_representation_teacher(self) -> None:
+        """Load a frozen, per-rank teacher after the student has been distributed/sharded."""
+        if not self._representation_distillation_enabled():
+            return
+
+        config = self._config.training_strategy.representation_distillation
+        checkpoint_setting = config.teacher_checkpoint or self._config.model.load_checkpoint
+        if checkpoint_setting is None:
+            raise ValueError(
+                "Representation distillation needs representation_distillation.teacher_checkpoint "
+                "or model.load_checkpoint"
+            )
+        checkpoint_path = self._find_checkpoint(checkpoint_setting)
+        if checkpoint_path is None:
+            raise ValueError(f"Could not find representation teacher checkpoint at {checkpoint_setting}")
+
+        logger.info(f"Loading frozen representation teacher from {checkpoint_path}")
+        teacher = load_transformer(
+            checkpoint_path=self._config.model.model_path,
+            device=self._accelerator.device,
+            dtype=torch.bfloat16,
+        )
+        teacher_state_keys = set(teacher.state_dict())
+        checkpoint_state = load_file(checkpoint_path)
+        auxiliary_markers = ("clean_rgb_sra_head.", "representation_distillation_head.")
+        unexpected = {
+            name
+            for name in checkpoint_state
+            if name not in teacher_state_keys and not any(marker in name for marker in auxiliary_markers)
+        }
+        if unexpected:
+            raise RuntimeError(f"Teacher checkpoint contains unexpected parameters: {sorted(unexpected)}")
+        checkpoint_state = {name: value for name, value in checkpoint_state.items() if name in teacher_state_keys}
+        incompatible = teacher.load_state_dict(checkpoint_state, strict=False)
+        if incompatible.missing_keys or incompatible.unexpected_keys:
+            raise RuntimeError(
+                "Teacher checkpoint is incompatible with the model: "
+                f"missing={sorted(incompatible.missing_keys)}, unexpected={sorted(incompatible.unexpected_keys)}"
+            )
+        teacher.requires_grad_(False)
+        teacher.eval()
+        self._teacher_transformer = teacher
+        logger.info("Frozen representation teacher loaded; it is replicated per rank and excluded from the optimizer")
 
     def _resolve_resume_state(self) -> tuple[int, TrainingState | None]:
         """Determine resume state by looking for a training state file next to the loaded checkpoint.
@@ -720,6 +898,10 @@ class LtxvTrainer:
             and fp.lora_rank != cfg.lora.rank
         ):
             mismatches.append(f"lora_rank: {fp.lora_rank} → {cfg.lora.rank}")
+        distillation = getattr(cfg.training_strategy, "representation_distillation", None)
+        current_distillation = distillation.model_dump(mode="json") if distillation is not None else None
+        if fp.representation_distillation != current_distillation:
+            mismatches.append("representation_distillation configuration changed")
         if mismatches:
             logger.warning(
                 f"⚠️ Training state config mismatch ({', '.join(mismatches)}). "
@@ -831,20 +1013,28 @@ class LtxvTrainer:
             self._transformer.get_base_model() if hasattr(self._transformer, "get_base_model") else self._transformer
         )
 
-        checkpoint_skip_blocks = None
+        checkpoint_skip_blocks: set[int] = set()
         if self._clean_rgb_sra_enabled():
-            checkpoint_skip_blocks = {int(self._config.training_strategy.clean_rgb_sra_hidden_layer) - 1}
+            checkpoint_skip_blocks.add(int(self._config.training_strategy.clean_rgb_sra_hidden_layer) - 1)
             logger.info(
                 "Clean RGB SRA: retaining activations for transformer block "
                 f"{self._config.training_strategy.clean_rgb_sra_hidden_layer} (1-based)"
             )
+        if self._representation_distillation_enabled():
+            layer_number = int(self._config.training_strategy.representation_distillation.student_hidden_layer)
+            checkpoint_skip_blocks.add(layer_number - 1)
+            logger.info(
+                "Representation distillation: retaining activations for transformer block "
+                f"{layer_number} (1-based)"
+            )
         transformer.set_gradient_checkpointing(
             self._config.optimization.enable_gradient_checkpointing,
-            skip_blocks=checkpoint_skip_blocks,
+            skip_blocks=checkpoint_skip_blocks or None,
         )
 
         # noinspection PyTypeChecker
         self._transformer = self._accelerator.prepare(self._transformer)
+        self._load_representation_teacher()
 
         # Log GPU memory usage after model preparation
         vram_usage_gb = torch.cuda.memory_allocated() / 1024**3
@@ -919,12 +1109,29 @@ class LtxvTrainer:
 
         lr = opt_cfg.learning_rate
         optimizer_params = self._trainable_params
+        auxiliary_groups: list[dict[str, Any]] = []
+        auxiliary_param_ids: set[int] = set()
         if self._clean_rgb_sra_enabled() and self._config.training_strategy.clean_rgb_sra_learning_rate is not None:
             head = self._find_model_attr(self._transformer, "clean_rgb_sra_head")
-            head_ids = {id(param) for param in head.parameters()}
+            head_params = list(head.parameters())
+            auxiliary_param_ids.update(id(param) for param in head_params)
+            auxiliary_groups.append(
+                {"params": head_params, "lr": self._config.training_strategy.clean_rgb_sra_learning_rate}
+            )
+        if self._representation_distillation_enabled():
+            config = self._config.training_strategy.representation_distillation
+            if config.projector == "mlp" and config.projector_learning_rate is not None:
+                head = self._find_model_attr(self._transformer, "representation_distillation_head")
+                head_params = list(head.parameters())
+                auxiliary_param_ids.update(id(param) for param in head_params)
+                auxiliary_groups.append({"params": head_params, "lr": config.projector_learning_rate})
+        if auxiliary_groups:
             optimizer_params = [
-                {"params": [param for param in self._trainable_params if id(param) not in head_ids], "lr": lr},
-                {"params": list(head.parameters()), "lr": self._config.training_strategy.clean_rgb_sra_learning_rate},
+                {
+                    "params": [param for param in self._trainable_params if id(param) not in auxiliary_param_ids],
+                    "lr": lr,
+                },
+                *auxiliary_groups,
             ]
         if opt_cfg.optimizer_type == "adamw":
             optimizer = AdamW(optimizer_params, lr=lr)
@@ -1032,6 +1239,12 @@ class LtxvTrainer:
         if is_compile_enabled:
             plugin = self._accelerator.state.dynamo_plugin
             logger.info(f"🔥 torch.compile enabled via Accelerate: backend={plugin.backend}, mode={plugin.mode}")
+
+            if self._representation_distillation_enabled():
+                raise ValueError(
+                    "Representation distillation uses dynamic intermediate-layer hooks and does not support "
+                    "torch.compile. Use a non-compile Accelerate config."
+                )
 
             if self._accelerator.distributed_type == DistributedType.FSDP:
                 logger.warning(
@@ -1300,6 +1513,11 @@ class LtxvTrainer:
                 scheduler_type=self._config.optimization.scheduler_type,
                 training_mode=self._config.model.training_mode,
                 lora_rank=self._config.lora.rank if self._config.lora is not None else None,
+                representation_distillation=(
+                    self._config.training_strategy.representation_distillation.model_dump(mode="json")
+                    if self._representation_distillation_enabled()
+                    else None
+                ),
             ),
             rng_states=RngStates(
                 torch_state=torch.random.get_rng_state(),

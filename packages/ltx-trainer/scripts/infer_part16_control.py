@@ -4,7 +4,7 @@
 
 The official LTX-2.3 checkpoint supplies model metadata plus the Gemma/VAE
 components. ``--trained-checkpoint`` is loaded as a transformer-only weight
-overlay. Training-only ``clean_rgb_sra_head`` tensors are intentionally ignored.
+overlay. Training-only auxiliary head tensors are intentionally ignored.
 """
 
 from __future__ import annotations
@@ -36,7 +36,12 @@ def load_finetuned_transformer(
     """Build LTX-2.3 from the official checkpoint and apply full-tune weights."""
     transformer = load_transformer(base_checkpoint, device=device, dtype=torch.bfloat16)
     state_dict = load_file(trained_checkpoint, device="cpu")
-    inference_state = {name: value for name, value in state_dict.items() if "clean_rgb_sra_head." not in name}
+    training_only_markers = ("clean_rgb_sra_head.", "representation_distillation_head.")
+    inference_state = {
+        name: value
+        for name, value in state_dict.items()
+        if not any(marker in name for marker in training_only_markers)
+    }
 
     incompatible = transformer.load_state_dict(inference_state, strict=False)
     if incompatible.missing_keys or incompatible.unexpected_keys:

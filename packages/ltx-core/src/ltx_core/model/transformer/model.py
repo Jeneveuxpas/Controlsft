@@ -371,6 +371,7 @@ class LTXModel(torch.nn.Module):
         video: TransformerArgs | None,
         audio: TransformerArgs | None,
         perturbations: BatchedPerturbationConfig,
+        stop_after_block: int | None = None,
     ) -> tuple[TransformerArgs | None, TransformerArgs | None]:
         """Process transformer blocks for LTX."""
         for block_idx, block in enumerate(self.transformer_blocks):
@@ -405,7 +406,42 @@ class LTXModel(torch.nn.Module):
             else:
                 video, audio = block(video=video, audio=audio)
 
+            if stop_after_block is not None and block_idx == stop_after_block:
+                break
+
         return video, audio
+
+    @torch.inference_mode()
+    def extract_video_hidden(
+        self,
+        video: Modality,
+        audio: Modality | None,
+        layer_number: int,
+    ) -> torch.Tensor:
+        """Return video tokens after a one-based block number without running later blocks or the output head."""
+        layer_index = layer_number - 1
+        if not 0 <= layer_index < self.num_blocks:
+            raise ValueError(f"layer_number {layer_number} is outside 1..{self.num_blocks}")
+        if not self.model_type.is_video_enabled():
+            raise ValueError("Video is not enabled for this model")
+        if not self.model_type.is_audio_enabled() and audio is not None:
+            raise ValueError("Audio is not enabled for this model")
+
+        video_args = self.video_args_preprocessor.prepare(video, audio)
+        audio_args = self.audio_args_preprocessor.prepare(audio, video) if audio is not None else None
+        perturbations = BatchedPerturbationConfig.empty(
+            video_args.x.shape[0],
+            self.num_blocks,
+            video_args.x.device,
+            video_args.x.dtype,
+        )
+        video_out, _ = self._process_transformer_blocks(
+            video=video_args,
+            audio=audio_args,
+            perturbations=perturbations,
+            stop_after_block=layer_index,
+        )
+        return video_out.x
 
     def _process_output(
         self,

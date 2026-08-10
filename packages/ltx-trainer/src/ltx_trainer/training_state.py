@@ -11,6 +11,7 @@ class ConfigFingerprint(BaseModel):
     scheduler_type: str
     training_mode: str
     lora_rank: int | None = None
+    representation_distillation: dict[str, Any] | None = None
 
 
 class RngStates(BaseModel):
