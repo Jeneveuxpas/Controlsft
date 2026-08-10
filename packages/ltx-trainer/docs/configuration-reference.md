@@ -242,7 +242,8 @@ tokens remain excluded by the video loss mask. To run pure SFT without control o
 `representation_distillation` enables a frozen full-model teacher while the student remains unconditioned. Teacher
 references are declared separately so their latent directories are loaded without being prepended to student tokens.
 The current implementation is video-only, requires `model.training_mode: full`, requires empty student
-`video.conditions`, and cannot be combined with Clean RGB SRA. Omit the entire block to disable distillation.
+`video.conditions`, and can be combined with Clean RGB SRA as an additional student-only auxiliary loss. Omit the
+entire block to disable distillation.
 
 | Parameter | Description |
 |-----------|-------------|

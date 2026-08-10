@@ -162,6 +162,22 @@ def test_distillation_config_rejects_conditioned_student_and_probabilistic_teach
         )
 
 
+def test_distillation_config_allows_clean_rgb_sra_auxiliary_loss() -> None:
+    config = FlexibleStrategyConfig(
+        video=ModalityConfig(is_generated=True, latents_dir="latents"),
+        clean_rgb_sra_loss_weight=0.4,
+        clean_rgb_sra_hidden_layer=8,
+        representation_distillation=RepresentationDistillationConfig(
+            teacher_conditions=[ReferenceConditionConfig(latents_dir="reference_latents")],
+            loss_weight=0.5,
+        ),
+    )
+
+    assert config.clean_rgb_sra_loss_weight == 0.4
+    assert config.clean_rgb_sra_hidden_layer == 8
+    assert config.representation_distillation.loss_weight == 0.5
+
+
 def test_projection_and_cosine_loss_only_backpropagate_to_student() -> None:
     head = RepresentationProjectionHead(input_dim=8, hidden_dim=4)
     student = torch.randn(2, 3, 8, requires_grad=True)

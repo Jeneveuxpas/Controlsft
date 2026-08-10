@@ -24,7 +24,7 @@ clean RGB target ── VAE x0 ────────────────�
 - 当前消融配置使用 `training_mode: full`，不是 LoRA。
 - 没有加入 foreground、Part16/Depth 重建或 XYZ loss。
 
-新增的 teacher/student 蒸馏是另一条独立训练路径，不能与 Clean RGB SRA 同时启用：
+新增的 teacher/student 蒸馏可以与 Clean RGB SRA 联合启用：
 
 ```text
                                same x0, same Gaussian ε, same text
@@ -77,16 +77,17 @@ LayerNorm → Linear → GELU → (Residual MLP Block) × K → LayerNorm → Li
 `K = clean_rgb_sra_num_layers - 2`。每个 residual block 都有可学习 scale，初始值为
 `1 / sqrt(K)`；输出层使用小方差权重和 zero bias 初始化。
 
-当前 SRA 消融参数：
+当前 A-F 联合消融中的 Clean `x_0` SRA 参数：
 
 | 参数 | 当前值 | 说明 |
 | --- | ---: | --- |
-| `clean_rgb_sra_loss_weight` | `0.1` | warmup 完成后的权重 |
-| `clean_rgb_sra_hidden_layer` | `16` | 第 16 个 transformer block，**1-based** |
+| `clean_rgb_sra_loss_weight` | `0.4` | warmup 完成后的权重 |
+| `clean_rgb_sra_hidden_layer` | `8` | 第 8 个 transformer block，**1-based** |
 | `clean_rgb_sra_hidden_dim` | `1024` | MLP hidden width |
-| `clean_rgb_sra_num_layers` | `3 / 5 / 8` | Linear 总层数消融 |
+| `clean_rgb_sra_num_layers` | `5` | Linear 总层数 |
 | `clean_rgb_sra_warmup_steps` | `100` | SRA loss weight 线性 warmup |
-| `clean_rgb_sra_beta` | `0.05` | SmoothL1 beta |
+| `clean_rgb_sra_loss_type` | `cosine` | 对齐 detached clean RGB latent `x_0` |
+| `clean_rgb_sra_beta` | `0.05` | 仅 SmoothL1 模式使用 |
 | `clean_rgb_sra_learning_rate` | `2e-5` | SRA head 独立 LR |
 
 SRA head 会包含在全量 checkpoint 中，也会单独导出为：
@@ -110,8 +111,10 @@ W&B 新增 `train/clean_rgb_sra_raw`、`train/clean_rgb_sra_loss` 和
   `teacher_hidden_layer`，不执行后续 block 和 output head。
 - 两路始终共享同一个 clean target `x0` 和同一份 Gaussian noise `ε`；变化的是每个 token 使用的
   timestep，而不是重新采样另一份噪声。
-- 总目标为 `L_total = L_flow + λ(step) L_repr`。teacher 全程 `eval + inference_mode + detach`，
-  只有 student 和可选 projector 更新。
+- 总目标为 `L_total = L_flow + λ_repr(step) L_repr + λ_sra(step) L_clean_rgb_sra`；最后一项在
+  `clean_rgb_sra_loss_weight > 0` 时启用，A-F 当前默认开启。teacher 全程
+  `eval + inference_mode + detach`，只有 student、
+  representation projector 和可选 Clean RGB SRA head 更新。
 
 ### Noise mode
 
@@ -158,6 +161,8 @@ L1/L2 与 cosine 的数值尺度不同，不能直接把相同 `loss_weight` 理
 | F | 16 → 34 | teacher `clamp(t-U(0,0.2))`；student `t` | 2-layer MLP | cosine | 小间隔 SRA 是否优于独立大间隔 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_distill_f_l16_l34_mlp_sra.yaml) |
 
 A↔B、C↔D、D↔E 是单核心变量对比；D↔F 用于比较独立大 gap 与 SRA 限定小 gap。
+A-F 共同叠加第 8 层 Clean `x_0` SRA 辅助 loss（cosine、权重 0.4、100-step warmup），因此这组配置
+比较的是 representation distillation 的主变量，而不是是否启用 Clean RGB SRA。
 B→C 同时改变 layer pair 和 loss，因此不能单独归因于层选择；
 如果要做严格层消融，需要补一组 `B-cosine` 或 `C-l1`。A/B 当前 `loss_weight=0.8` 是待短跑校准值，
 L1 无界且可能受 feature norm 影响。
@@ -306,9 +311,9 @@ uv run python scripts/infer_part16_precomputed.py \
 | [flexible.py](packages/ltx-trainer/src/ltx_trainer/training_strategies/flexible.py) | reference/SRA 处理、paired 输入、共享噪声与三种 timestep 模式 |
 | [sra.py](packages/ltx-trainer/src/ltx_trainer/sra.py) | 可配置深度的 residual MLP projector |
 | [distillation.py](packages/ltx-trainer/src/ltx_trainer/distillation.py) | 逐 token distillation MLP 与 cosine/L1/L2 loss |
-| [model.py](packages/ltx-core/src/ltx_core/model/transformer/model.py) | teacher 中间层 early-stop hidden extraction |
+| [model.py](packages/ltx-core/src/ltx_core/model/transformer/model.py) | teacher 中间层 extraction 与 checkpoint 边界外 post-block callback |
 | [timestep_samplers.py](packages/ltx-trainer/src/ltx_trainer/timestep_samplers.py) | 可选高噪声区间采样覆盖 |
-| [trainer.py](packages/ltx-trainer/src/ltx_trainer/trainer.py) | frozen teacher、student hook、独立 LR、FSDP 与 checkpoint |
+| [trainer.py](packages/ltx-trainer/src/ltx_trainer/trainer.py) | frozen teacher、联合辅助 loss、独立 LR、FSDP 与 checkpoint |
 | [validation_runner.py](packages/ltx-trainer/src/ltx_trainer/validation_runner.py) | validation reference 布局与训练对齐 |
 | [infer_part16_control.py](packages/ltx-trainer/scripts/infer_part16_control.py) | 单 Part16 全量 checkpoint 推理 |
 | [infer_part16_precomputed.py](packages/ltx-trainer/scripts/infer_part16_precomputed.py) | 从 signal latent + TE 批量推理 |

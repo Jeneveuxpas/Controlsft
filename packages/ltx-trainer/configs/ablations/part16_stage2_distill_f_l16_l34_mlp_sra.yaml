@@ -3,7 +3,7 @@ model:
   model_path: "/workspace/code/controlsft_teacher/checkpoints/ltx-2.3/ltx-2.3-22b-dev.safetensors"
   text_encoder_path: null
   training_mode: "full"
-  load_checkpoint: "/workspace/code/controlsft_teacher/checkpoints/merged/model_weights_step_40000_fp32.safetensors"
+  load_checkpoint: "/workspace/code/controlsft_teacher/outputs/20260807_180910/checkpoints/training_state_step_07000/model_weights.safetensors"
 
 training_strategy:
   name: "flexible"
@@ -11,9 +11,16 @@ training_strategy:
     is_generated: true
     latents_dir: "latents"
     conditions: []
-  clean_rgb_sra_loss_weight: 0.0
+  clean_rgb_sra_loss_weight: 0.4
+  clean_rgb_sra_learning_rate: 2.0e-5
+  clean_rgb_sra_hidden_layer: 8
+  clean_rgb_sra_hidden_dim: 1024
+  clean_rgb_sra_num_layers: 5
+  clean_rgb_sra_warmup_steps: 100
+  clean_rgb_sra_loss_type: "cosine"
+  clean_rgb_sra_beta: 0.05
   representation_distillation:
-    teacher_checkpoint: "/workspace/code/controlsft_teacher/checkpoints/merged/model_weights_step_40000_fp32.safetensors"
+    teacher_checkpoint: "/workspace/code/controlsft_teacher/outputs/20260807_180910/checkpoints/training_state_step_07000/model_weights.safetensors"
     teacher_conditions:
       - type: "reference"
         latents_dir: "reference_latents"
@@ -24,7 +31,7 @@ training_strategy:
     projector_hidden_dim: 1024
     projector_learning_rate: 2.0e-5
     loss_type: "cosine"
-    loss_weight: 0.8
+    loss_weight: 0.5
     warmup_steps: 100
     noise_mode: "sra"
     sra_timestep_max_gap: 0.2
@@ -62,7 +69,7 @@ checkpoints:
   interval: 200
   keep_last_n: 4
   precision: "bfloat16"
-  save_training_state: "full"
+  save_training_state: "minimal"
   no_resume: true
 
 flow_matching:
@@ -79,7 +86,7 @@ wandb:
   enabled: true
   project: "ltx-2.3-part16-control"
   entity: null
-  tags: ["stage2-distill-f", "student16-teacher34", "sra", "max-gap-0p2", "no-control-student", "fsdp", "4node"]
+  tags: ["stage2-distill-f", "student16-teacher34", "sra", "max-gap-0p2", "clean-rgb-sra-l8", "joint-aux", "no-control-student", "fsdp", "single-node-8gpu"]
   log_validation_videos: false
 
 seed: 42

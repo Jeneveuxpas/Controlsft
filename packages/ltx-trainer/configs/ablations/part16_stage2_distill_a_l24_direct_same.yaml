@@ -11,7 +11,14 @@ training_strategy:
     is_generated: true
     latents_dir: "latents"
     conditions: []
-  clean_rgb_sra_loss_weight: 0.0
+  clean_rgb_sra_loss_weight: 0.4
+  clean_rgb_sra_learning_rate: 2.0e-5
+  clean_rgb_sra_hidden_layer: 8
+  clean_rgb_sra_hidden_dim: 1024
+  clean_rgb_sra_num_layers: 5
+  clean_rgb_sra_warmup_steps: 100
+  clean_rgb_sra_loss_type: "cosine"
+  clean_rgb_sra_beta: 0.05
   representation_distillation:
     teacher_checkpoint: "/workspace/code/controlsft_teacher/checkpoints/merged/model_weights_step_40000_fp32.safetensors"
     teacher_conditions:
@@ -76,7 +83,7 @@ wandb:
   enabled: true
   project: "ltx-2.3-part16-control"
   entity: null
-  tags: ["stage2-distill-a", "layer24-direct", "l1", "same-noise", "no-control-student", "fsdp", "4node"]
+  tags: ["stage2-distill-a", "layer24-direct", "l1", "same-noise", "clean-rgb-sra-l8", "no-control-student", "fsdp", "4node"]
   log_validation_videos: false
 
 seed: 42

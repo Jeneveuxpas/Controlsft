@@ -316,11 +316,16 @@ class LtxvTrainer:
                             "train/step_time": step_time,
                             "train/global_step": self._global_step,
                         }
-                        if self._clean_rgb_sra_enabled() and len(self._optimizer.param_groups) > 1:
-                            metrics["train/sra_learning_rate"] = self._optimizer.param_groups[1]["lr"]
-                        if self._representation_distillation_enabled() and len(self._optimizer.param_groups) > 1:
-                            metrics["train/distillation_projector_learning_rate"] = self._optimizer.param_groups[1][
-                                "lr"
+                        auxiliary_lrs = {
+                            group.get("group_name"): group["lr"]
+                            for group in self._optimizer.param_groups
+                            if group.get("group_name") is not None
+                        }
+                        if "clean_rgb_sra" in auxiliary_lrs:
+                            metrics["train/sra_learning_rate"] = auxiliary_lrs["clean_rgb_sra"]
+                        if "representation_distillation" in auxiliary_lrs:
+                            metrics["train/distillation_projector_learning_rate"] = auxiliary_lrs[
+                                "representation_distillation"
                             ]
                         metrics.update(self._sigma_tracker.get_metrics())
                         self._log_metrics(metrics)
@@ -453,56 +458,62 @@ class LtxvTrainer:
             # Use strategy to prepare training inputs (returns ModelInputs with Modality objects)
             model_inputs = self._training_strategy.prepare_training_inputs(batch, self._timestep_sampler)
 
-        # Run the SRA head from the selected block hook. Under FSDP the head is
-        # part of the root flat parameter, which is only materialized during the
-        # transformer forward; calling it after the forward sees empty shards on
-        # some ranks.
+        # Run auxiliary heads after their selected block has returned from its
+        # activation-checkpoint boundary. The heads remain inside the root FSDP
+        # forward, where their flat parameters are materialized, but are not
+        # re-entered when checkpointed blocks are recomputed during backward.
         captured_sra_prediction: dict[str, Tensor] = {}
         captured_student_hidden: dict[str, Tensor] = {}
         hook_handles: list[torch.utils.hooks.RemovableHandle] = []
+        register_post_block_hook = self._find_model_attr(self._transformer, "register_post_block_hook")
+        if register_post_block_hook is None:
+            raise ValueError("Transformer does not support post-block auxiliary hooks")
         if self._clean_rgb_sra_enabled():
             if model_inputs.video_target_start_index is None:
                 raise ValueError("Clean RGB SRA requires the target token start index")
-            block = self._clean_rgb_sra_block()
-            head = self._find_model_attr(self._transformer, "clean_rgb_sra_head")
-            if head is None:
+            layer_number = int(self._config.training_strategy.clean_rgb_sra_hidden_layer)
+            self._clean_rgb_sra_block()
+            clean_rgb_sra_head = self._find_model_attr(self._transformer, "clean_rgb_sra_head")
+            if clean_rgb_sra_head is None:
                 raise ValueError("Clean RGB SRA head is not attached")
 
-            def _run_sra_head(_module, _inputs, output) -> None:
-                video_args = output[0]
+            def _run_sra_head(video_args, _audio_args) -> None:
                 if video_args is None:
                     raise ValueError("Clean RGB SRA requested but the selected block returned no video state")
                 target_hidden = video_args.x[:, model_inputs.video_target_start_index :, :]
-                head_param = next(head.parameters())
-                captured_sra_prediction["video"] = head(
+                head_param = next(clean_rgb_sra_head.parameters())
+                captured_sra_prediction["video"] = clean_rgb_sra_head(
                     target_hidden.to(device=head_param.device, dtype=head_param.dtype)
                 )
 
-            hook_handles.append(block.register_forward_hook(_run_sra_head))
+            hook_handles.append(register_post_block_hook(layer_number - 1, _run_sra_head))
         if self._representation_distillation_enabled():
             if model_inputs.video_target_start_index is None:
                 raise ValueError("Representation student input has no target token start index")
             config = self._config.training_strategy.representation_distillation
-            block = self._transformer_block(
+            self._transformer_block(
                 self._transformer,
                 int(config.student_hidden_layer),
                 "representation_distillation.student_hidden_layer",
             )
-            head = self._find_model_attr(self._transformer, "representation_distillation_head")
-            if config.projector == "mlp" and head is None:
+            representation_head = self._find_model_attr(self._transformer, "representation_distillation_head")
+            if config.projector == "mlp" and representation_head is None:
                 raise ValueError("Representation distillation projector is not attached")
 
-            def _capture_student_hidden(_module, _inputs, output) -> None:
-                video_args = output[0]
+            def _capture_student_hidden(video_args, _audio_args) -> None:
                 if video_args is None:
                     raise ValueError("Representation distillation block returned no video state")
                 target_hidden = video_args.x[:, model_inputs.video_target_start_index :, :]
-                if head is not None:
-                    head_param = next(head.parameters())
-                    target_hidden = head(target_hidden.to(device=head_param.device, dtype=head_param.dtype))
+                if representation_head is not None:
+                    head_param = next(representation_head.parameters())
+                    target_hidden = representation_head(
+                        target_hidden.to(device=head_param.device, dtype=head_param.dtype)
+                    )
                 captured_student_hidden["video"] = target_hidden
 
-            hook_handles.append(block.register_forward_hook(_capture_student_hidden))
+            hook_handles.append(
+                register_post_block_hook(int(config.student_hidden_layer) - 1, _capture_student_hidden)
+            )
         try:
             video_pred, audio_pred = self._transformer(
                 video=model_inputs.video,
@@ -792,10 +803,24 @@ class LtxvTrainer:
     def _load_full_checkpoint(self, checkpoint_path: Path) -> None:
         """Load full model checkpoint."""
         state_dict = load_file(checkpoint_path)
+        auxiliary_markers = ("clean_rgb_sra_head.", "representation_distillation_head.")
+        model_state = self._transformer.state_dict()
+        incompatible_auxiliary = {
+            name
+            for name, value in state_dict.items()
+            if name in model_state
+            and value.shape != model_state[name].shape
+            and any(marker in name for marker in auxiliary_markers)
+        }
+        if incompatible_auxiliary:
+            state_dict = {name: value for name, value in state_dict.items() if name not in incompatible_auxiliary}
+            logger.info(
+                "Initial checkpoint auxiliary head shape differs from the configured head; "
+                "using newly initialized parameters for that head"
+            )
         incompatible = self._transformer.load_state_dict(state_dict, strict=False)
         missing = set(incompatible.missing_keys)
         unexpected = set(incompatible.unexpected_keys)
-        auxiliary_markers = ("clean_rgb_sra_head.", "representation_distillation_head.")
         allowed_missing = {name for name in missing if any(marker in name for marker in auxiliary_markers)}
         allowed_unexpected = {name for name in unexpected if any(marker in name for marker in auxiliary_markers)}
         invalid_missing = missing - allowed_missing
@@ -1013,23 +1038,20 @@ class LtxvTrainer:
             self._transformer.get_base_model() if hasattr(self._transformer, "get_base_model") else self._transformer
         )
 
-        checkpoint_skip_blocks: set[int] = set()
         if self._clean_rgb_sra_enabled():
-            checkpoint_skip_blocks.add(int(self._config.training_strategy.clean_rgb_sra_hidden_layer) - 1)
             logger.info(
-                "Clean RGB SRA: retaining activations for transformer block "
+                "Clean RGB SRA: capturing activations from checkpointed transformer block "
                 f"{self._config.training_strategy.clean_rgb_sra_hidden_layer} (1-based)"
             )
         if self._representation_distillation_enabled():
             layer_number = int(self._config.training_strategy.representation_distillation.student_hidden_layer)
-            checkpoint_skip_blocks.add(layer_number - 1)
             logger.info(
-                "Representation distillation: retaining activations for transformer block "
+                "Representation distillation: capturing activations from checkpointed transformer block "
                 f"{layer_number} (1-based)"
             )
         transformer.set_gradient_checkpointing(
             self._config.optimization.enable_gradient_checkpointing,
-            skip_blocks=checkpoint_skip_blocks or None,
+            skip_blocks=None,
         )
 
         # noinspection PyTypeChecker
@@ -1116,7 +1138,11 @@ class LtxvTrainer:
             head_params = list(head.parameters())
             auxiliary_param_ids.update(id(param) for param in head_params)
             auxiliary_groups.append(
-                {"params": head_params, "lr": self._config.training_strategy.clean_rgb_sra_learning_rate}
+                {
+                    "params": head_params,
+                    "lr": self._config.training_strategy.clean_rgb_sra_learning_rate,
+                    "group_name": "clean_rgb_sra",
+                }
             )
         if self._representation_distillation_enabled():
             config = self._config.training_strategy.representation_distillation
@@ -1124,12 +1150,19 @@ class LtxvTrainer:
                 head = self._find_model_attr(self._transformer, "representation_distillation_head")
                 head_params = list(head.parameters())
                 auxiliary_param_ids.update(id(param) for param in head_params)
-                auxiliary_groups.append({"params": head_params, "lr": config.projector_learning_rate})
+                auxiliary_groups.append(
+                    {
+                        "params": head_params,
+                        "lr": config.projector_learning_rate,
+                        "group_name": "representation_distillation",
+                    }
+                )
         if auxiliary_groups:
             optimizer_params = [
                 {
                     "params": [param for param in self._trainable_params if id(param) not in auxiliary_param_ids],
                     "lr": lr,
+                    "group_name": "main",
                 },
                 *auxiliary_groups,
             ]

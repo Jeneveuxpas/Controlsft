@@ -274,8 +274,6 @@ class FlexibleStrategyConfig(TrainingStrategyConfigBase):
             )
         if any(condition.probability != 1.0 for condition in distillation.teacher_conditions):
             raise ValueError("Teacher reference conditions must use probability=1.0 for deterministic pairing")
-        if self.clean_rgb_sra_loss_weight > 0.0:
-            raise ValueError("Clean RGB SRA and representation distillation cannot be enabled together")
         return self
 
     def get_data_sources(self) -> dict[str, str]:

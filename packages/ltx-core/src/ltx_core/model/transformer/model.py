@@ -1,4 +1,6 @@
 import logging
+from collections import OrderedDict
+from collections.abc import Callable
 from enum import Enum
 
 import torch
@@ -86,6 +88,10 @@ class LTXModel(torch.nn.Module):
         )
         self._enable_gradient_checkpointing = False
         self._gradient_checkpointing_skip_blocks: set[int] = set()
+        self._post_block_hooks: OrderedDict[
+            int,
+            tuple[int, Callable[[TransformerArgs | None, TransformerArgs | None], None]],
+        ] = OrderedDict()
         self.cross_attention_adaln = cross_attention_adaln
         self.use_middle_indices_grid = use_middle_indices_grid
         self.rope_type = rope_type
@@ -361,6 +367,18 @@ class LTXModel(torch.nn.Module):
         self._enable_gradient_checkpointing = enable
         self._gradient_checkpointing_skip_blocks = set(skip_blocks or ())
 
+    def register_post_block_hook(
+        self,
+        block_index: int,
+        hook: Callable[[TransformerArgs | None, TransformerArgs | None], None],
+    ) -> torch.utils.hooks.RemovableHandle:
+        """Register a callback outside a block's activation-checkpoint boundary."""
+        if not 0 <= block_index < len(self.transformer_blocks):
+            raise ValueError(f"block_index {block_index} is outside 0..{len(self.transformer_blocks) - 1}")
+        handle = torch.utils.hooks.RemovableHandle(self._post_block_hooks)
+        self._post_block_hooks[handle.id] = (block_index, hook)
+        return handle
+
     @property
     def num_blocks(self) -> int:
         """Number of transformer blocks."""
@@ -405,6 +423,10 @@ class LTXModel(torch.nn.Module):
                 )
             else:
                 video, audio = block(video=video, audio=audio)
+
+            for hook_block_index, hook in tuple(self._post_block_hooks.values()):
+                if hook_block_index == block_idx:
+                    hook(video, audio)
 
             if stop_after_block is not None and block_idx == stop_after_block:
                 break
