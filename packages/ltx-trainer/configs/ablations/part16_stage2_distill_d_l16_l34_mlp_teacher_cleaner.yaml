@@ -1,4 +1,4 @@
-# Experiment D: student uses t while the teacher uses the cleaner min(t, s).
+# Experiment D: independently sample t/s, then give high to the student and low to the teacher.
 model:
   model_path: "/workspace/code/controlsft_teacher/checkpoints/ltx-2.3/ltx-2.3-22b-dev.safetensors"
   text_encoder_path: null
@@ -26,7 +26,7 @@ training_strategy:
     loss_type: "cosine"
     loss_weight: 0.8
     warmup_steps: 100
-    noise_mode: "teacher_cleaner"
+    noise_mode: "independent_high_low"
 
 optimization:
   learning_rate: 4.0e-6
@@ -78,8 +78,8 @@ wandb:
   enabled: true
   project: "ltx-2.3-part16-control"
   entity: null
-  tags: ["stage2-distill-d", "student16-teacher34", "teacher-cleaner", "no-control-student", "fsdp", "4node"]
+  tags: ["stage2-distill-d", "student16-teacher34", "independent-high-low", "no-control-student", "fsdp", "4node"]
   log_validation_videos: false
 
 seed: 42
-output_dir: "/workspace/code/controlsft_teacher/outputs/stage2_distill_d_l16_l34_mlp_teacher_cleaner"
+output_dir: "/workspace/code/controlsft_teacher/outputs/stage2_distill_d_l16_l34_mlp_independent_high_low"

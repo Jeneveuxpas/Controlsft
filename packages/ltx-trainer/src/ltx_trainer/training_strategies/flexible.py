@@ -150,7 +150,7 @@ class ModalityConfig(BaseModel):
 
 
 class RepresentationDistillationConfig(BaseModel):
-    """Frozen-teacher feature distillation with optional Self-Flow noising."""
+    """Frozen-teacher feature distillation with configurable timestep pairing."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -177,15 +177,24 @@ class RepresentationDistillationConfig(BaseModel):
     )
     loss_weight: float = Field(default=0.8, gt=0.0)
     warmup_steps: int = Field(default=0, ge=0)
-    noise_mode: Literal["same", "teacher_cleaner", "self_flow"] = Field(
+    noise_mode: Literal["same", "independent_high_low", "sra", "dual_timestep"] = Field(
         default="same",
-        description="same: shared t; teacher_cleaner: teacher min(t,s); self_flow: token-wise student t/s",
+        description=(
+            "same: shared t; independent_high_low: independently sample t/s and sort them; "
+            "sra: teacher uses t-U(0,x); dual_timestep: student mixes independently sampled high/low timesteps"
+        ),
     )
-    second_timestep_probability: float = Field(
+    sra_timestep_max_gap: float = Field(
+        default=0.2,
+        gt=0.0,
+        le=1.0,
+        description="Maximum x in the SRA teacher timestep t-U(0,x), clamped to [0,1]",
+    )
+    dual_timestep_low_probability: float = Field(
         default=0.1,
-        ge=0.0,
-        le=0.5,
-        description="Self-Flow token ratio using s; the paper uses 0.1 for video",
+        gt=0.0,
+        lt=1.0,
+        description="Expected fraction of student target tokens assigned the lower timestep in dual_timestep mode",
     )
 
 
@@ -331,8 +340,8 @@ class DistillationModelInputs:
     student: ModelInputs
     teacher: ModelInputs
     base_sigmas: Tensor
-    second_sigmas: Tensor | None
-    second_timestep_mask: Tensor | None
+    low_sigmas: Tensor | None
+    low_timestep_mask: Tensor | None
 
 
 @dataclass
@@ -393,11 +402,12 @@ class FlexibleStrategy(TrainingStrategy):
             raise ValueError("Representation distillation is not configured")
 
         data = self._patchify_latent_data(batch["video_latents"], "video")
-        student_target, teacher_target, second_sigmas, second_mask = self._initialize_distillation_targets(
+        student_target, teacher_target, low_sigmas, low_mask = self._initialize_distillation_targets(
             data.latents,
             timestep_sampler,
             noise_mode=distillation.noise_mode,
-            second_timestep_probability=distillation.second_timestep_probability,
+            sra_timestep_max_gap=distillation.sra_timestep_max_gap,
+            dual_timestep_low_probability=distillation.dual_timestep_low_probability,
         )
         teacher_config = video_config.model_copy(update={"conditions": list(distillation.teacher_conditions)})
         student_result = self._process_modality_data(
@@ -418,8 +428,8 @@ class FlexibleStrategy(TrainingStrategy):
             student=self._to_model_inputs(student_result, None),
             teacher=self._to_model_inputs(teacher_result, None),
             base_sigmas=student_target.sigmas,
-            second_sigmas=second_sigmas,
-            second_timestep_mask=second_mask,
+            low_sigmas=low_sigmas,
+            low_timestep_mask=low_mask,
         )
 
     @staticmethod
@@ -693,28 +703,38 @@ class FlexibleStrategy(TrainingStrategy):
         latents: Tensor,
         timestep_sampler: TimestepSampler,
         *,
-        noise_mode: Literal["same", "teacher_cleaner", "self_flow"],
-        second_timestep_probability: float,
+        noise_mode: Literal["same", "independent_high_low", "sra", "dual_timestep"],
+        sra_timestep_max_gap: float,
+        dual_timestep_low_probability: float,
     ) -> tuple[InitializedTarget, InitializedTarget, Tensor | None, Tensor | None]:
         """Construct student/teacher views using the same x0 and Gaussian noise."""
         batch_size, seq_len, _ = latents.shape
-        base_sigmas = timestep_sampler.sample_for(latents)
+        sampled_sigmas = timestep_sampler.sample_for(latents)
         noise = torch.randn_like(latents)
         targets = noise - latents
         loss_mask = torch.ones(batch_size, seq_len, dtype=torch.bool, device=latents.device)
-        base_timesteps = base_sigmas[:, None].expand(batch_size, seq_len).clone()
 
-        second_sigmas = None
-        second_mask = None
-        student_timesteps = base_timesteps
-        teacher_sigmas = base_sigmas
-        if noise_mode != "same":
-            second_sigmas = timestep_sampler.sample_for(latents)
-            teacher_sigmas = torch.minimum(base_sigmas, second_sigmas)
-            if noise_mode == "self_flow":
-                second_mask = torch.rand(batch_size, seq_len, device=latents.device) < second_timestep_probability
-                second_timesteps = second_sigmas[:, None].expand(batch_size, seq_len)
-                student_timesteps = torch.where(second_mask, second_timesteps, base_timesteps)
+        student_sigmas = sampled_sigmas
+        teacher_sigmas = sampled_sigmas
+        low_sigmas = None
+        low_mask = None
+
+        if noise_mode == "sra":
+            interval = float(sra_timestep_max_gap) * torch.rand_like(sampled_sigmas)
+            low_sigmas = torch.clamp(sampled_sigmas - interval, min=0.0, max=1.0)
+            teacher_sigmas = low_sigmas
+        elif noise_mode in {"independent_high_low", "dual_timestep"}:
+            other_sigmas = timestep_sampler.sample_for(latents)
+            low_sigmas = torch.minimum(sampled_sigmas, other_sigmas)
+            high_sigmas = torch.maximum(sampled_sigmas, other_sigmas)
+            student_sigmas = high_sigmas
+            teacher_sigmas = low_sigmas
+
+        student_timesteps = student_sigmas[:, None].expand(batch_size, seq_len).clone()
+        if noise_mode == "dual_timestep":
+            low_mask = torch.rand(batch_size, seq_len, device=latents.device) < dual_timestep_low_probability
+            low_timesteps = teacher_sigmas[:, None].expand(batch_size, seq_len)
+            student_timesteps = torch.where(low_mask, low_timesteps, student_timesteps)
 
         teacher_timesteps = teacher_sigmas[:, None].expand(batch_size, seq_len).clone()
         student_tau = student_timesteps.unsqueeze(-1)
@@ -727,9 +747,9 @@ class FlexibleStrategy(TrainingStrategy):
             targets=targets,
             timesteps=student_timesteps,
             loss_mask=loss_mask,
-            # LTX-2.3 prompt AdaLN requires one scalar. Keep the base timestep because
-            # most video tokens use t and uniform-timestep inference also conditions on t.
-            sigmas=base_sigmas,
+            # LTX-2.3 prompt AdaLN requires one scalar. In dual mode most target
+            # tokens use the high timestep, so condition the student prompt on high.
+            sigmas=student_sigmas,
         )
         teacher = InitializedTarget(
             noisy_latents=teacher_noisy,
@@ -738,7 +758,7 @@ class FlexibleStrategy(TrainingStrategy):
             loss_mask=loss_mask.clone(),
             sigmas=teacher_sigmas,
         )
-        return student, teacher, second_sigmas, second_mask
+        return student, teacher, low_sigmas, low_mask
 
     def _apply_intrinsic_condition(
         self,

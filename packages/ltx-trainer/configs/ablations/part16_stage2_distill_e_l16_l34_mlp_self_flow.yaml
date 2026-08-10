@@ -1,4 +1,4 @@
-# Experiment E: cleaner teacher plus 10% token-wise dual timesteps for the student.
+# Experiment E: student uses 90% high and 10% low tokens; teacher uses uniform low.
 model:
   model_path: "/workspace/code/controlsft_teacher/checkpoints/ltx-2.3/ltx-2.3-22b-dev.safetensors"
   text_encoder_path: null
@@ -26,8 +26,8 @@ training_strategy:
     loss_type: "cosine"
     loss_weight: 0.8
     warmup_steps: 100
-    noise_mode: "self_flow"
-    second_timestep_probability: 0.1
+    noise_mode: "dual_timestep"
+    dual_timestep_low_probability: 0.1
 
 optimization:
   learning_rate: 4.0e-6
@@ -79,8 +79,8 @@ wandb:
   enabled: true
   project: "ltx-2.3-part16-control"
   entity: null
-  tags: ["stage2-distill-e", "student16-teacher34", "self-flow", "dual-timestep", "no-control-student", "fsdp", "4node"]
+  tags: ["stage2-distill-e", "student16-teacher34", "sorted-high-low", "dual-timestep", "no-control-student", "fsdp", "4node"]
   log_validation_videos: false
 
 seed: 42
-output_dir: "/workspace/code/controlsft_teacher/outputs/stage2_distill_e_l16_l34_mlp_self_flow"
+output_dir: "/workspace/code/controlsft_teacher/outputs/stage2_distill_e_l16_l34_mlp_dual_timestep"

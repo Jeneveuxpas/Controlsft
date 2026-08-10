@@ -3,8 +3,8 @@
 > [!IMPORTANT]
 > 本仓库的 `main` 分支基于官方 LTX-2，目前包含三条研究路径：Part16 reference 控制全量微调、
 > Clean RGB SRA 辅助监督，以及“冻结的 Part16 condition teacher → 无 control student”中间表示蒸馏。
-> SRA 实验比较 projector 深度、对齐层和 loss；蒸馏实验比较同层/跨层、可选 MLP、cleaner teacher
-> 和 Self-Flow-inspired dual timestep。代码同时保留 `Part16 + Depth` 两个有序 reference 的能力。
+> SRA 实验比较 projector 深度、对齐层和 loss；蒸馏实验支持 same、独立 high/low、SRA interval
+> 和 dual timestep 四种噪声配对。代码同时保留 `Part16 + Depth` 两个有序 reference 的能力。
 >
 > 官方基线：[`Lightricks/LTX-2@9377758`](https://github.com/Lightricks/LTX-2/tree/9377758131b1ffde4b7f766804590a6617bf2ab9)
 
@@ -118,12 +118,14 @@ W&B 新增 `train/clean_rgb_sra_raw`、`train/clean_rgb_sra_loss` 和
 | `noise_mode` | Student target token | Teacher target token | 含义 |
 | --- | --- | --- | --- |
 | `same` | 全部使用 `t` | 全部使用 `t` | 只比较 condition/层/projector 的影响 |
-| `teacher_cleaner` | 全部使用 `t` | 全部使用 `min(t, s)` | teacher 永远不比 student 更脏 |
-| `self_flow` | 每个 token 以概率 `p` 使用 `s`，否则 `t` | 全部使用 `min(t, s)` | LTX 适配的 dual-timestep student |
+| `independent_high_low` | 全部使用 `max(t,s)` | 全部使用 `min(t,s)` | 独立采样后排序，每个样本明确一高一低 |
+| `sra` | 全部使用 `t` | 全部使用 `clamp(t-U(0,x),0,1)` | SRA 的区间式 cleaner teacher |
+| `dual_timestep` | 每个 token 以概率 `p` 使用 low，否则 high | 全部使用 low | 排序后的 dual-timestep student |
 
-`second_timestep_probability` 只在 `self_flow` 中生效。视频配置使用 `p=0.1`，这是逐 token
-Bernoulli 的期望比例，不保证每个样本恰好 10%。LTX video AdaLN 使用逐 token `t/s`；LTX-2.3
-prompt AdaLN 仍使用 sample-level base `t`，这是迁移到 LTX 架构时的适配。
+`sra_timestep_max_gap` 是上式的 `x`，默认 `0.2`。`dual_timestep_low_probability` 只在
+`dual_timestep` 中生效；视频配置使用 `p=0.1`，这是逐 token Bernoulli 的期望比例，
+不保证每个样本恰好 10%。LTX video AdaLN 使用逐 token high/low；LTX-2.3 student prompt
+AdaLN 使用 sample-level high，teacher prompt AdaLN 使用 low。
 
 ### Projector 与表示 loss
 
@@ -151,24 +153,27 @@ L1/L2 与 cosine 的数值尺度不同，不能直接把相同 `loss_weight` 理
 | A | 24 → 24 | same | none | L1 | condition 信息能否直接蒸馏到同层 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_distill_a_l24_direct_same.yaml) |
 | B | 24 → 24 | same | 2-layer MLP | L1 | projector 是否提高可对齐性 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_distill_b_l24_mlp_same.yaml) |
 | C | 16 → 34 | same | 2-layer MLP | cosine | 浅层 student 是否能学习深层语义 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_distill_c_l16_l34_mlp_same.yaml) |
-| D | 16 → 34 | teacher `min(t,s)`；student `t` | 2-layer MLP | cosine | cleaner teacher 是否增强监督 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_distill_d_l16_l34_mlp_teacher_cleaner.yaml) |
-| E | 16 → 34 | teacher `min(t,s)`；student token-wise `t/s` | 2-layer MLP | cosine | dual timestep 是否进一步有效 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_distill_e_l16_l34_mlp_self_flow.yaml) |
+| D | 16 → 34 | teacher low；student high | 2-layer MLP | cosine | 独立一高一低是否增强监督 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_distill_d_l16_l34_mlp_teacher_cleaner.yaml) |
+| E | 16 → 34 | teacher low；student token-wise high/low | 2-layer MLP | cosine | dual timestep 是否进一步有效 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_distill_e_l16_l34_mlp_self_flow.yaml) |
 
 A↔B、C↔D、D↔E 是单核心变量对比。B→C 同时改变 layer pair 和 loss，因此不能单独归因于层选择；
 如果要做严格层消融，需要补一组 `B-cosine` 或 `C-l1`。A/B 当前 `loss_weight=0.8` 是待短跑校准值，
 L1 无界且可能受 feature norm 影响。
 
-### 与 Self-Flow 原文的边界
+### 与 SRA / Self-Flow 原文的边界
 
 这里实现的是 Self-Flow-inspired dual-timestep representation distillation，不是论文的完整复现：
 
 - 原文使用 EMA self-teacher；本仓库使用训练前已得到的固定 Part16 condition teacher。
 - 原文 teacher/student 条件相同；这里 teacher 有 Part16 reference，student 没有。
+- 本仓库的 `dual_timestep` 会先将两个独立采样排序成 high/low，再让 student 按 token 混合；
+  这是本轮蒸馏实验的明确定义。
 - A-E 默认 `high_noise_probability: 0.0`，未启用论文 appendix 的 5% `[0.95, 1.0]` 高噪声覆盖。
   若消融该策略，必须对所有比较组统一设置 `high_noise_probability: 0.05`，并在严格复现其 scheduler 时
   设置 `uniform_prob: 0.0`。
 
-论文：[`Self-Supervised Flow Matching for Scalable Multi-Modal Synthesis`](https://arxiv.org/abs/2603.06507)。
+参考：[SRA 官方实现](https://github.com/vvvvvjdy/SRA)；
+[`Self-Supervised Flow Matching for Scalable Multi-Modal Synthesis`](https://arxiv.org/abs/2603.06507)。
 
 ### Checkpoint、FSDP 与恢复训练
 
@@ -197,7 +202,7 @@ train/representation_distillation_weight
 train/representation_student_norm
 train/representation_teacher_norm
 train/representation_teacher_sigma
-train/representation_second_timestep_fraction  # 仅 self_flow
+train/representation_low_timestep_fraction     # 仅 dual_timestep
 train/distillation_projector_learning_rate      # 使用 MLP 独立 LR 时
 ```
 

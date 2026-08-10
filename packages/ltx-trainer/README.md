@@ -66,8 +66,8 @@ as unconditioned-student/T2V models rather than through the Part16 control inter
 
 The implementation and experiment matrix are documented in the repository [README](../../README.md). The five
 teacher/student configs are indexed in [configs/README.md](configs/README.md), and every student is initialized from
-the condition-teacher checkpoint while the frozen teacher remains explicit and separate. This path is video-only,
-requires full fine-tuning, and is a Self-Flow-inspired LTX adaptation rather than an EMA Self-Flow reproduction.
+the condition-teacher checkpoint while the frozen teacher remains explicit and separate. The video-only full-tuning
+path supports shared, independently sorted high/low, SRA interval, and token-wise dual-timestep pairing.
 
 ---
 

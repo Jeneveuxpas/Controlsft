@@ -544,9 +544,9 @@ class LtxvTrainer:
             )
             aux_metrics.update(distillation_metrics)
             aux_metrics["train/representation_teacher_sigma"] = distillation_inputs.teacher.video.sigma.mean()
-            if distillation_inputs.second_timestep_mask is not None:
-                aux_metrics["train/representation_second_timestep_fraction"] = (
-                    distillation_inputs.second_timestep_mask.float().mean()
+            if distillation_inputs.low_timestep_mask is not None:
+                aux_metrics["train/representation_low_timestep_fraction"] = (
+                    distillation_inputs.low_timestep_mask.float().mean()
                 )
             loss = loss + distillation_loss
 
