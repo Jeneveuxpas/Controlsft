@@ -102,7 +102,7 @@ W&B 新增 `train/clean_rgb_sra_raw`、`train/clean_rgb_sra_loss` 和
 
 ### 训练语义
 
-- `model.load_checkpoint` 用 condition-teacher checkpoint 初始化 student；A-E 中两者初始权重相同。
+- `model.load_checkpoint` 用 condition-teacher checkpoint 初始化 student；A-F 中两者初始权重相同。
 - student 的 `video.conditions: []`，训练和推理均不依赖 Part16 token。
 - frozen teacher 使用 `teacher_conditions` 读取 Part16 reference；reference 保持 clean、`timestep=0`，
   不进入生成 loss，也会在 hidden alignment 前被切掉。
@@ -120,12 +120,12 @@ W&B 新增 `train/clean_rgb_sra_raw`、`train/clean_rgb_sra_loss` 和
 | `same` | 全部使用 `t` | 全部使用 `t` | 只比较 condition/层/projector 的影响 |
 | `independent_high_low` | 全部使用 `max(t,s)` | 全部使用 `min(t,s)` | 独立采样后排序，每个样本明确一高一低 |
 | `sra` | 全部使用 `t` | 全部使用 `clamp(t-U(0,x),0,1)` | SRA 的区间式 cleaner teacher |
-| `dual_timestep` | 每个 token 以概率 `p` 使用 low，否则 high | 全部使用 low | 排序后的 dual-timestep student |
+| `dual_timestep` | 每个 token 以概率 `p` 使用独立采样的 `s`，否则使用 `t` | 全部使用 `min(t,s)` | 保持 student token 的 timestep 边际分布 |
 
-`sra_timestep_max_gap` 是上式的 `x`，默认 `0.2`。`dual_timestep_low_probability` 只在
+`sra_timestep_max_gap` 是上式的 `x`，默认 `0.2`。`dual_timestep_second_probability` 只在
 `dual_timestep` 中生效；视频配置使用 `p=0.1`，这是逐 token Bernoulli 的期望比例，
-不保证每个样本恰好 10%。LTX video AdaLN 使用逐 token high/low；LTX-2.3 student prompt
-AdaLN 使用 sample-level high，teacher prompt AdaLN 使用 low。
+不保证每个样本恰好 10%。LTX video AdaLN 使用逐 token `t/s`；LTX-2.3 student prompt
+AdaLN 使用 sample-level base `t`，teacher prompt AdaLN 使用 `min(t,s)`。
 
 ### Projector 与表示 loss
 
@@ -146,7 +146,7 @@ Linear(D, 1024) → SiLU → Linear(1024, D)
 L1/L2 与 cosine 的数值尺度不同，不能直接把相同 `loss_weight` 理解成相同监督强度。短跑时应同时观察
 `train/denoising_loss`、`train/representation_distillation_loss` 和 student/teacher feature norm。
 
-### A-E 实验矩阵
+### A-F 实验矩阵
 
 | 实验 | Student → Teacher 层 | Noise | Projector | Loss | 主要问题 | 配置 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -154,9 +154,11 @@ L1/L2 与 cosine 的数值尺度不同，不能直接把相同 `loss_weight` 理
 | B | 24 → 24 | same | 2-layer MLP | L1 | projector 是否提高可对齐性 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_distill_b_l24_mlp_same.yaml) |
 | C | 16 → 34 | same | 2-layer MLP | cosine | 浅层 student 是否能学习深层语义 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_distill_c_l16_l34_mlp_same.yaml) |
 | D | 16 → 34 | teacher low；student high | 2-layer MLP | cosine | 独立一高一低是否增强监督 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_distill_d_l16_l34_mlp_teacher_cleaner.yaml) |
-| E | 16 → 34 | teacher low；student token-wise high/low | 2-layer MLP | cosine | dual timestep 是否进一步有效 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_distill_e_l16_l34_mlp_self_flow.yaml) |
+| E | 16 → 34 | teacher `min(t,s)`；student token-wise `t/s` | 2-layer MLP | cosine | dual timestep 是否进一步有效 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_distill_e_l16_l34_mlp_self_flow.yaml) |
+| F | 16 → 34 | teacher `clamp(t-U(0,0.2))`；student `t` | 2-layer MLP | cosine | 小间隔 SRA 是否优于独立大间隔 | [配置](packages/ltx-trainer/configs/ablations/part16_stage2_distill_f_l16_l34_mlp_sra.yaml) |
 
-A↔B、C↔D、D↔E 是单核心变量对比。B→C 同时改变 layer pair 和 loss，因此不能单独归因于层选择；
+A↔B、C↔D、D↔E 是单核心变量对比；D↔F 用于比较独立大 gap 与 SRA 限定小 gap。
+B→C 同时改变 layer pair 和 loss，因此不能单独归因于层选择；
 如果要做严格层消融，需要补一组 `B-cosine` 或 `C-l1`。A/B 当前 `loss_weight=0.8` 是待短跑校准值，
 L1 无界且可能受 feature norm 影响。
 
@@ -166,9 +168,9 @@ L1 无界且可能受 feature norm 影响。
 
 - 原文使用 EMA self-teacher；本仓库使用训练前已得到的固定 Part16 condition teacher。
 - 原文 teacher/student 条件相同；这里 teacher 有 Part16 reference，student 没有。
-- 本仓库的 `dual_timestep` 会先将两个独立采样排序成 high/low，再让 student 按 token 混合；
-  这是本轮蒸馏实验的明确定义。
-- A-E 默认 `high_noise_probability: 0.0`，未启用论文 appendix 的 5% `[0.95, 1.0]` 高噪声覆盖。
+- `dual_timestep` 中 student 保留未排序的 `t/s` 逐 token 混合，teacher 才使用 `min(t,s)`；
+  mask 与数值大小无关，因此 student token 仍保持原始 timestep 边际分布。
+- A-F 默认 `high_noise_probability: 0.0`，未启用论文 appendix 的 5% `[0.95, 1.0]` 高噪声覆盖。
   若消融该策略，必须对所有比较组统一设置 `high_noise_probability: 0.05`，并在严格复现其 scheduler 时
   设置 `uniform_prob: 0.0`。
 
@@ -181,9 +183,9 @@ L1 无界且可能受 feature norm 影响。
   会过滤 `representation_distillation_head.*`。
 - teacher 在每个 rank 上完整复制为 BF16，不进入 FSDP、optimizer 或 student checkpoint。显存预算必须包含
   一整套 teacher；多 GPU 节点启动时也要考虑每个进程并发读取完整 checkpoint 的 CPU RAM/IO。
-- A-E 显式固定 `teacher_checkpoint`。恢复 student 时可以把 `model.load_checkpoint` 改为 student checkpoint，
+- A-F 显式固定 `teacher_checkpoint`。恢复 student 时可以把 `model.load_checkpoint` 改为 student checkpoint，
   但不能让 teacher 路径跟着改变。
-- A-E 当前 `checkpoints.no_resume: true`，每次启动都会从加载的模型权重重新计 step 0，不恢复 optimizer。
+- A-F 当前 `checkpoints.no_resume: true`，每次启动都会从加载的模型权重重新计 step 0，不恢复 optimizer。
   需要断点恢复时应改为 `false`；training-state fingerprint 会校验 projector、层、loss、noise mode 和
   teacher checkpoint，发生变化时拒绝恢复旧 optimizer/global step。
 - 动态 block hook 不支持 `torch.compile`；蒸馏模式检测到 Dynamo 会在启动阶段报错。请使用普通 FSDP
@@ -202,7 +204,7 @@ train/representation_distillation_weight
 train/representation_student_norm
 train/representation_teacher_norm
 train/representation_teacher_sigma
-train/representation_low_timestep_fraction     # 仅 dual_timestep
+train/representation_second_timestep_fraction  # 仅 dual_timestep
 train/distillation_projector_learning_rate      # 使用 MLP 独立 LR 时
 ```
 
@@ -272,7 +274,7 @@ uv run python scripts/infer_part16_control.py \
 推理加载时会自动忽略。分辨率、帧数和 reference scale factor 应与训练保持一致；
 `--include-control` 可保存控制与生成结果的左右对比视频。
 
-注意：A-E 的 distilled student 训练时没有 reference token，标准评估应走无 control 的 T2V/student 推理，
+注意：A-F 的 distilled student 训练时没有 reference token，标准评估应走无 control 的 T2V/student 推理，
 不能把 Part16 control 脚本的结果当作 student 蒸馏效果。这个脚本主要用于 condition teacher 和带 Part16
 控制的 SRA checkpoint。
 

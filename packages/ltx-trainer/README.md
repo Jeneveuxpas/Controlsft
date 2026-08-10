@@ -64,10 +64,10 @@ as unconditioned-student/T2V models rather than through the Part16 control inter
 
 ### Part16 research extensions
 
-The implementation and experiment matrix are documented in the repository [README](../../README.md). The five
+The implementation and experiment matrix are documented in the repository [README](../../README.md). The six
 teacher/student configs are indexed in [configs/README.md](configs/README.md), and every student is initialized from
 the condition-teacher checkpoint while the frozen teacher remains explicit and separate. The video-only full-tuning
-path supports shared, independently sorted high/low, SRA interval, and token-wise dual-timestep pairing.
+path supports shared, independently sorted high/low, SRA interval, and unordered token-wise `t/s` pairing.
 
 ---
 

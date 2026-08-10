@@ -258,13 +258,14 @@ The current implementation is video-only, requires `model.training_mode: full`, 
 | `warmup_steps` | Linear warmup steps for the representation-loss weight. |
 | `noise_mode` | `same`, `independent_high_low`, `sra`, or `dual_timestep`. |
 | `sra_timestep_max_gap` | Maximum `x` in the SRA teacher timestep `clamp(t-U(0,x),0,1)`; default `0.2`. |
-| `dual_timestep_low_probability` | Student token fraction assigned the lower timestep in `dual_timestep`; use `0.1` for video. |
+| `dual_timestep_second_probability` | Student token fraction assigned independently sampled `s` in `dual_timestep`; use `0.1` for video. |
 
 `same` shares one sampled timestep. `independent_high_low` independently samples `t/s`, then assigns `max(t,s)` to
 the student and `min(t,s)` to the teacher. `sra` keeps student `t` and assigns the teacher
-`clamp(t-U(0,x),0,1)`. `dual_timestep` independently samples and sorts high/low, assigns high/low per student token,
-and gives the teacher uniform low. All modes share the same clean latent and Gaussian noise. LTX-2.3 still needs one
-scalar prompt timestep; dual mode uses high for the student prompt while retaining token-wise values in `timesteps`.
+`clamp(t-U(0,x),0,1)`. `dual_timestep` independently samples `t/s`, assigns `s` or `t` per student token without
+sorting, and gives the teacher uniform `min(t,s)`. All modes share the same clean latent and Gaussian noise. LTX-2.3
+still needs one scalar prompt timestep; dual mode uses base `t` for the student prompt while retaining token-wise
+values in `timesteps`.
 
 Set `teacher_checkpoint` explicitly for resumable runs. The fallback to `model.load_checkpoint` is convenient for the
 initial student initialization, but on resume that model path normally changes to a student checkpoint and must not
@@ -272,8 +273,8 @@ silently replace the fixed condition teacher.
 
 The teacher is a fixed BF16 model replicated in full on every rank; it is not FSDP-sharded, optimized, or saved in
 student checkpoints. Budget GPU memory and per-node checkpoint-loading CPU RAM accordingly. This differs from the
-EMA teacher in the Self-Flow paper. For `dual_timestep`, LTX video AdaLN receives token-wise high/low, while LTX-2.3
-student prompt AdaLN uses high. Dynamic forward hooks are incompatible with `torch.compile`; the trainer rejects
+EMA teacher in the Self-Flow paper. For `dual_timestep`, LTX video AdaLN receives token-wise `t/s`, while LTX-2.3
+student prompt AdaLN uses base `t`. Dynamic forward hooks are incompatible with `torch.compile`; the trainer rejects
 that combination at startup, so use the regular FSDP config. Custom FSDP configs must keep
 `fsdp_use_orig_params: true`, matching the checked-in Accelerate configs, because the projector parameter groups are
 constructed around original parameter objects. Resume state also fingerprints the complete distillation block and

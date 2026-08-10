@@ -59,7 +59,7 @@ def _strategy(noise_mode: str) -> FlexibleStrategy:
                 teacher_conditions=[ReferenceConditionConfig(latents_dir="reference_latents")],
                 noise_mode=noise_mode,
                 sra_timestep_max_gap=0.2,
-                dual_timestep_low_probability=0.1,
+                dual_timestep_second_probability=0.1,
             ),
         )
     )
@@ -82,15 +82,15 @@ def test_same_noise_distillation_pairs_target_tokens_and_loads_teacher_reference
     assert torch.equal(student.video_targets, teacher.video_targets)
     assert torch.equal(student.video.timesteps, teacher.video.timesteps[:, 2:])
     assert paired.low_sigmas is None
-    assert paired.low_timestep_mask is None
+    assert paired.second_timestep_mask is None
 
 
-def test_dual_timestep_uses_shared_noise_sorted_timesteps_and_uniform_low_teacher() -> None:
+def test_dual_timestep_uses_shared_noise_and_preserves_unordered_student_t_s() -> None:
     torch.manual_seed(7)
     strategy = _strategy("dual_timestep")
     paired = strategy.prepare_distillation_inputs(
         _batch(batch_size=8, height=8, width=8),
-        SequenceTimestepSampler([0.8, 0.2]),
+        SequenceTimestepSampler([0.2, 0.8]),
     )
     student = paired.student
     teacher = paired.teacher
@@ -102,11 +102,14 @@ def test_dual_timestep_uses_shared_noise_sorted_timesteps_and_uniform_low_teache
     teacher_noise = (teacher_xt - (1 - teacher_tau) * student_x0) / teacher_tau
 
     assert torch.allclose(student_noise, teacher_noise, atol=2e-5, rtol=2e-5)
-    assert sorted(student.video.timesteps.unique().tolist()) == pytest.approx([0.2, 0.8])
+    second_mask = paired.second_timestep_mask
+    target_timesteps = student.video.timesteps
+    assert torch.allclose(target_timesteps[second_mask], torch.full_like(target_timesteps[second_mask], 0.8))
+    assert torch.allclose(target_timesteps[~second_mask], torch.full_like(target_timesteps[~second_mask], 0.2))
     assert torch.allclose(teacher_tau, torch.full_like(teacher_tau, 0.2))
-    assert torch.allclose(student.video.sigma, torch.full_like(student.video.sigma, 0.8))
+    assert torch.allclose(student.video.sigma, torch.full_like(student.video.sigma, 0.2))
     assert torch.allclose(paired.low_sigmas, torch.full_like(paired.low_sigmas, 0.2))
-    assert paired.low_timestep_mask.float().mean().item() == pytest.approx(0.1, abs=0.05)
+    assert second_mask.float().mean().item() == pytest.approx(0.1, abs=0.05)
 
 
 @pytest.mark.parametrize(("first", "second"), [(0.7, 0.3), (0.3, 0.7)])
@@ -123,7 +126,7 @@ def test_independent_high_low_sorts_student_and_teacher_timesteps(first: float, 
     )
     assert torch.allclose(paired.student.video.sigma, torch.full_like(paired.student.video.sigma, 0.7))
     assert torch.allclose(paired.teacher.video.sigma, torch.full_like(paired.teacher.video.sigma, 0.3))
-    assert paired.low_timestep_mask is None
+    assert paired.second_timestep_mask is None
 
 
 def test_sra_teacher_timestep_is_below_student_by_at_most_configured_gap() -> None:
@@ -139,7 +142,7 @@ def test_sra_teacher_timestep_is_below_student_by_at_most_configured_gap() -> No
     assert torch.all(teacher_timesteps <= student_timesteps)
     assert torch.all(teacher_timesteps >= student_timesteps - 0.2)
     assert torch.allclose(teacher_timesteps, paired.low_sigmas[:, None].expand_as(teacher_timesteps))
-    assert paired.low_timestep_mask is None
+    assert paired.second_timestep_mask is None
 
 
 def test_distillation_config_rejects_conditioned_student_and_probabilistic_teacher() -> None:
