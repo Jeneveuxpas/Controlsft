@@ -50,6 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--base-checkpoint", type=Path, required=True)
     parser.add_argument("--trained-checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--vae-checkpoint",
+        type=Path,
+        help="Optional tuned VAE state dict used to override the base checkpoint's video decoder.",
+    )
     parser.add_argument("--manifest-path", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--start-index", type=int, default=0)
@@ -66,6 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference-downscale-factor", type=int, default=1)
     parser.add_argument("--reference-temporal-scale-factor", type=int, default=1)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--no-reference-control",
+        action="store_true",
+        help="Generate without injecting reference/Part16 control latents.",
+    )
     parser.add_argument("--disable-progress-bars", action="store_true")
     parser.add_argument(
         "--tiled-video-decode",
@@ -156,7 +166,9 @@ def _load_reference_item(
     fallback_id = reference_path.stem
     sample_id = _safe_sample_id(record.get("id"), fallback_id)
     extension = ".png" if target_dims[2] == 1 else ".mp4"
-    output_path = output_dir / f"{manifest_index:06d}_{sample_id}{extension}"
+    # Keep generated files independent of long dataset IDs.
+    # The line number is stable for a fixed manifest.
+    output_path = output_dir / f"line-{manifest_index}{extension}"
     return PrecomputedItem(
         manifest_index=manifest_index,
         sample_id=sample_id,
@@ -239,6 +251,8 @@ def main() -> None:  # noqa: PLR0912, PLR0915
     for path in (args.base_checkpoint, args.trained_checkpoint, args.manifest_path):
         if not path.is_file():
             parser.error(f"File does not exist: {path}")
+    if args.vae_checkpoint is not None and not args.vae_checkpoint.is_file():
+        parser.error(f"File does not exist: {args.vae_checkpoint}")
     if args.negative_te is not None and not args.negative_te.is_file():
         parser.error(f"Negative TE file does not exist: {args.negative_te}")
     if not torch.cuda.is_available():
@@ -305,18 +319,28 @@ def main() -> None:  # noqa: PLR0912, PLR0915
             prompt=f"precomputed:{item.sample_id}",
             video_dims=item.target_dims,
             seed=args.seed + item.manifest_index,
-            conditions=[
-                ReferenceConditionConfig(
-                    video="precomputed://signal_latent",
-                    downscale_factor=args.reference_downscale_factor,
-                    temporal_scale_factor=args.reference_temporal_scale_factor,
-                )
-            ],
+            conditions=(
+                []
+                if args.no_reference_control
+                else [
+                    ReferenceConditionConfig(
+                        video="precomputed://signal_latent",
+                        downscale_factor=args.reference_downscale_factor,
+                        temporal_scale_factor=args.reference_temporal_scale_factor,
+                        include_in_output=True,
+                    )
+                ]
+            ),
         )
         for item in items
     ]
     cached_media = [
-        CachedSampleMedia(conditions={0: CachedConditionMedia(latent=item.reference_latent)}) for item in items
+        (
+            CachedSampleMedia()
+            if args.no_reference_control
+            else CachedSampleMedia(conditions={0: CachedConditionMedia(latent=item.reference_latent)})
+        )
+        for item in items
     ]
     config = ValidationConfig(
         samples=samples,
@@ -340,6 +364,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915
         precomputed_embeddings=cached_embeddings,
         precomputed_media=cached_media,
         tiled_video_decode=args.tiled_video_decode,
+        video_vae_checkpoint=args.vae_checkpoint.resolve() if args.vae_checkpoint is not None else None,
     )
     transformer = load_finetuned_transformer(
         base_checkpoint=base_checkpoint,

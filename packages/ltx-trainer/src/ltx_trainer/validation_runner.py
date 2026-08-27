@@ -139,10 +139,12 @@ class ValidationRunner:
         precomputed_embeddings: list[CachedPromptEmbeddings] | None = None,
         precomputed_media: list[CachedSampleMedia] | None = None,
         tiled_video_decode: bool = True,
+        video_vae_checkpoint: str | Path | None = None,
     ):
         self._config = config
         self._model_path = Path(model_path)
         self._tiled_video_decode = tiled_video_decode
+        self._video_vae_checkpoint = Path(video_vae_checkpoint) if video_vae_checkpoint is not None else None
 
         self._video_patchifier = VideoLatentPatchifier(patch_size=1)
         self._audio_patchifier = AudioPatchifier(patch_size=1)
@@ -424,7 +426,12 @@ class ValidationRunner:
         )
         if needs_video_decoder:
             logger.debug("Loading video VAE decoder for validation...")
-            self._vae_decoder = load_video_vae_decoder(self._model_path, device="cpu", dtype=torch.bfloat16)
+            self._vae_decoder = load_video_vae_decoder(
+                self._model_path,
+                device="cpu",
+                dtype=torch.bfloat16,
+                weights_override_path=self._video_vae_checkpoint,
+            )
             if self._vae_decoder is not None:
                 self._vae_decoder.requires_grad_(False)
 
@@ -601,11 +608,40 @@ class ValidationRunner:
         video_output = self._finalize_modality(video_state, video_tools, self._decode_video, device)
         audio_output = self._finalize_modality(audio_state, audio_tools, self._decode_audio, device)
 
-        # 6. Side-by-side reference output
+        # 6. Side-by-side reference output. Precomputed evaluation samples only
+        # carry the reference latent, so decode it here when a caller requests
+        # the control|target comparison.
         if video_output is not None:
+            cached_media = self._ensure_reference_pixels(sample, cached_media, device)
             video_output = self._apply_reference_side_by_side(video_output, sample, cached_media)
 
         return video_output, audio_output
+
+    def _ensure_reference_pixels(
+        self, sample: ValidationSample, cached_media: CachedSampleMedia, device: torch.device
+    ) -> CachedSampleMedia:
+        """Decode precomputed reference latents requested for side-by-side output."""
+        if self._vae_decoder is None:
+            return cached_media
+
+        updated = dict(cached_media.conditions)
+        for cond_idx, cond in enumerate(sample.conditions):
+            if cond.type != "reference" or not cond.include_in_output:
+                continue
+            media = updated.get(cond_idx)
+            if media is None or media.pixels is not None:
+                continue
+            self._vae_decoder.to(device)
+            latent = media.latent.to(device=device, dtype=torch.bfloat16)
+            if self._tiled_video_decode:
+                chunks = list(self._vae_decoder.tiled_decode(latent, tiling_config=_DEFAULT_TILING))
+                pixels = torch.cat(chunks, dim=2)
+            else:
+                pixels = self._vae_decoder(latent)
+            self._vae_decoder.to("cpu")
+            pixels = ((pixels + 1.0) / 2.0).clamp(0.0, 1.0)[0].float().cpu()
+            updated[cond_idx] = CachedConditionMedia(latent=media.latent, pixels=pixels, mask=media.mask)
+        return CachedSampleMedia(conditions=updated)
 
     # ------------------------------------------------------------------
     # Conditioning application

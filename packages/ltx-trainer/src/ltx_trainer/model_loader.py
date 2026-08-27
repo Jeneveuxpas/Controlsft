@@ -99,20 +99,29 @@ def load_video_vae_decoder(
     checkpoint_path: str | Path,
     device: Device = "cpu",
     dtype: torch.dtype = torch.bfloat16,
+    weights_override_path: str | Path | None = None,
 ) -> "VideoDecoder":
     """Load the video VAE decoder (for inference/validation).
     Args:
         checkpoint_path: Path to the safetensors checkpoint file
         device: Device to load model on
         dtype: Data type for model weights
+        weights_override_path: Optional raw VAE state dict whose decoder weights
+            override the decoder weights in ``checkpoint_path``. The base checkpoint
+            still supplies the model configuration and any missing weights.
     Returns:
         Loaded VideoDecoder
     """
     from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
     from ltx_core.model.video_vae import VAE_DECODER_COMFY_KEYS_FILTER, VideoDecoderConfigurator
 
+    model_path = (
+        str(checkpoint_path)
+        if weights_override_path is None
+        else (str(checkpoint_path), str(weights_override_path))
+    )
     return SingleGPUModelBuilder(
-        model_path=str(checkpoint_path),
+        model_path=model_path,
         model_class_configurator=VideoDecoderConfigurator,
         model_sd_ops=VAE_DECODER_COMFY_KEYS_FILTER,
     ).build(device=_to_torch_device(device), dtype=dtype)

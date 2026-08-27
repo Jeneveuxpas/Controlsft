@@ -77,6 +77,7 @@ packages/ltx-trainer/
 │   ├── caption_videos.py         # Automatic video captioning
 │   ├── decode_latents.py         # Latent decoding for debugging
 │   ├── infer_part16_control.py    # Full-model inference with one Part16 reference
+│   ├── infer_part16_precomputed.py # Batched inference from signal latents + TE
 │   ├── compute_reference.py      # Generate IC-LoRA reference videos
 │   └── split_scenes.py           # Scene detection and splitting
 ├── configs/                      # Example training configurations
