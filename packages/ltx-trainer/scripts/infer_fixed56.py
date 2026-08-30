@@ -20,7 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import torch
@@ -37,6 +37,8 @@ from ltx_core.text_encoders.gemma import convert_to_additive_mask
 from ltx_trainer.config import ReferenceConditionConfig, ValidationConfig, ValidationSample
 from ltx_trainer.ig_validation_runner import InternalGuidanceMixin
 from ltx_trainer.internal_guidance import IGGuider, default_calibration_for, load_sra_head
+from ltx_trainer.official_ig import IGSettings
+from ltx_trainer.official_validation_runner import OfficialStackMixin
 from ltx_trainer.model_loader import load_embeddings_processor, load_transformer
 from ltx_trainer.progress import TrainingProgress
 from ltx_trainer.video_utils import save_video
@@ -209,6 +211,10 @@ class ControlValidationRunner(ValidationRunner):
         return video, audio
 
 
+class OfficialControlRunner(OfficialStackMixin, ControlValidationRunner):
+    """ControlValidationRunner + official guidance stack (CFG/STG/rescale/skip_step, batched passes)."""
+
+
 class IGControlValidationRunner(InternalGuidanceMixin, ControlValidationRunner):
     """ControlValidationRunner + Internal Guidance.
 
@@ -285,6 +291,24 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     subset.add_argument("--limit", type=int, help="Shorthand for --indices 0..N-1.")
 
+    official = parser.add_argument_group("official guidance stack")
+    official.add_argument(
+        "--stack",
+        choices=["trainer", "official"],
+        default="trainer",
+        help="trainer: current sequential loop (STG only, no CFG/rescale). "
+        "official: batched cond/uncond/ptb passes with CFG + STG + rescale + skip_step.",
+    )
+    official.add_argument(
+        "--negative-te",
+        type=Path,
+        help="Precomputed negative-prompt TE file (see scripts/encode_negative_te.py). "
+        "Required for CFG (--guidance-scale > 1) on the official stack.",
+    )
+    official.add_argument("--rescale-scale", type=float, default=0.7, help="CFG rescale (official default 0.7).")
+    official.add_argument("--modality-scale", type=float, default=1.0, help="Keep 1.0 for video-only generation.")
+    official.add_argument("--skip-step", type=int, default=0, help="Reuse previous prediction every N+1 steps.")
+
     ig = parser.add_argument_group("internal guidance (IG)")
     ig.add_argument("--ig-scale", type=float, default=1.0, help="Extrapolation strength gamma. 1.0 disables IG.")
     ig.add_argument(
@@ -301,10 +325,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="auto -> token_norm for cosine heads, none for smooth_l1 heads.",
     )
-    ig.add_argument("--ig-mode", choices=["parallel", "nested"], default="parallel")
+    ig.add_argument(
+        "--ig-mode",
+        choices=["parallel", "nested"],
+        default="parallel",
+        help="Trainer-stack composition mode. The official stack always combines internal with CFG/STG before rescale.",
+    )
     ig.add_argument("--ig-sigma-low", type=float, default=0.0)
     ig.add_argument("--ig-sigma-high", type=float, default=1.0)
-    ig.add_argument("--ig-max-delta-norm", type=float, default=0.0)
 
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--worker-start", type=int, help=argparse.SUPPRESS)
@@ -491,6 +519,16 @@ def _run_worker(args: argparse.Namespace, rows: list[dict]) -> None:
 
     embeddings_processor = load_embeddings_processor(args.base_checkpoint.resolve(), device=device, dtype=torch.bfloat16)
     embeddings = [_connect_te(item.te_path, embeddings_processor, device) for item in items]
+    if args.stack == "official" and args.negative_te is not None:
+        negative = _connect_te(args.negative_te.resolve(), embeddings_processor, device)
+        embeddings = [
+            replace(
+                emb,
+                video_context_negative=negative.video_context_positive,
+                audio_context_negative=negative.audio_context_positive,
+            )
+            for emb in embeddings
+        ]
     del embeddings_processor
     torch.cuda.empty_cache()
 
@@ -558,7 +596,36 @@ def _run_worker(args: argparse.Namespace, rows: list[dict]) -> None:
     )
     transformer = _load_transformer(args.base_checkpoint.resolve(), args.checkpoint.resolve(), device)
 
-    if args.ig_scale != 1.0:
+    if args.stack == "official":
+        sra_head = None
+        ig_settings = None
+        if args.ig_scale != 1.0:
+            head_path = (args.sra_head or args.checkpoint).resolve()
+            sra_head, sra_metadata = load_sra_head(
+                head_path, transformer, device=device, dtype=torch.bfloat16, hidden_layer=args.ig_layer
+            )
+            loss_type = str(sra_metadata.get("clean_rgb_sra_loss_type", "unknown"))
+            calibration = (
+                default_calibration_for(loss_type) if args.ig_calibration == "auto" else args.ig_calibration
+            )
+            ig_settings = IGSettings(
+                guider=IGGuider(
+                    scale=args.ig_scale,
+                    sigma_low=args.ig_sigma_low,
+                    sigma_high=args.ig_sigma_high,
+                ),
+                hidden_layer=int(args.ig_layer or sra_metadata["clean_rgb_sra_hidden_layer"]),
+                calibration=calibration,
+            )
+        runner = OfficialControlRunner(
+            **runner_kwargs,
+            rescale_scale=args.rescale_scale,
+            modality_scale=args.modality_scale,
+            skip_step=args.skip_step,
+            sra_head=sra_head,
+            ig_settings=ig_settings,
+        )
+    elif args.ig_scale != 1.0:
         head_path = (args.sra_head or args.checkpoint).resolve()
         sra_head, sra_metadata = load_sra_head(
             head_path,
@@ -587,7 +654,6 @@ def _run_worker(args: argparse.Namespace, rows: list[dict]) -> None:
                 scale=args.ig_scale,
                 sigma_low=args.ig_sigma_low,
                 sigma_high=args.ig_sigma_high,
-                max_delta_norm=args.ig_max_delta_norm,
             ),
             ig_hidden_layer=hidden_layer,
             ig_calibration=calibration,
@@ -672,13 +738,20 @@ def _worker_command(args: argparse.Namespace, worker: Worker) -> list[str]:
     chosen = _select_indices(args)
     if len(chosen) != MANIFEST_SIZE:
         command.extend(["--indices", *(str(index) for index in chosen)])
+    if args.stack != "trainer":
+        command.extend(["--stack", args.stack])
+        command.extend(["--rescale-scale", str(args.rescale_scale)])
+        command.extend(["--modality-scale", str(args.modality_scale)])
+        command.extend(["--skip-step", str(args.skip_step)])
+        if args.negative_te is not None:
+            command.extend(["--negative-te", str(args.negative_te.resolve())])
     if args.ig_scale != 1.0:
         command.extend(["--ig-scale", str(args.ig_scale)])
-        command.extend(["--ig-mode", args.ig_mode])
+        if args.stack == "trainer":
+            command.extend(["--ig-mode", args.ig_mode])
         command.extend(["--ig-calibration", args.ig_calibration])
         command.extend(["--ig-sigma-low", str(args.ig_sigma_low)])
         command.extend(["--ig-sigma-high", str(args.ig_sigma_high)])
-        command.extend(["--ig-max-delta-norm", str(args.ig_max_delta_norm)])
         if args.sra_head is not None:
             command.extend(["--sra-head", str(args.sra_head.resolve())])
         if args.ig_layer is not None:
@@ -783,6 +856,13 @@ def main() -> None:
         raise ValueError("--ig-sigma-low/--ig-sigma-high must satisfy 0 <= low <= high <= 1")
     if args.ig_scale != 1.0 and (args.sra_head or args.checkpoint).suffix == ".safetensors" and args.ig_layer is None:
         raise ValueError("A .safetensors SRA head carries no metadata; pass --ig-layer explicitly")
+    if args.stack == "official":
+        if args.guidance_scale != 1.0 and args.negative_te is None:
+            raise ValueError("--guidance-scale > 1 on the official stack requires --negative-te")
+        if args.negative_te is not None and not args.negative_te.is_file():
+            raise FileNotFoundError(args.negative_te)
+    elif args.negative_te is not None:
+        raise ValueError("--negative-te only applies to --stack official")
     _select_indices(args)
     rows = _load_manifest(args.manifest)
     if args.worker_start is not None or args.worker_count is not None:

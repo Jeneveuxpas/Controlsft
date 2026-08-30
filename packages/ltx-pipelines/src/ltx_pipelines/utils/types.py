@@ -44,8 +44,8 @@ class PipelineComponents:
 class DenoisedLatentResult:
     """Output of one denoiser call for a single modality.
     ``denoised`` is the final blended prediction for this modality.
-    The remaining fields carry the per-pass raw outputs from ``_guided_denoise``
-    (all ``None`` for ``SimpleDenoiser``).  Denoisers return a
+    The remaining fields carry the raw guidance predictions from
+    ``_guided_denoise`` (all ``None`` for ``SimpleDenoiser``). Denoisers return a
     ``(video_result, audio_result)`` tuple; either element may be ``None``
     for absent modalities.
     """
@@ -55,6 +55,7 @@ class DenoisedLatentResult:
     cond: torch.Tensor | None = None
     ptb: torch.Tensor | None = None
     mod: torch.Tensor | None = None
+    internal: torch.Tensor | None = None
 
     @classmethod
     def result_or_none(
@@ -64,10 +65,11 @@ class DenoisedLatentResult:
         cond: torch.Tensor | None = None,
         ptb: torch.Tensor | None = None,
         mod: torch.Tensor | None = None,
+        internal: torch.Tensor | None = None,
     ) -> DenoisedLatentResult | None:
         if denoised is None:
             return None
-        return cls(denoised=denoised, uncond=uncond, cond=cond, ptb=ptb, mod=mod)
+        return cls(denoised=denoised, uncond=uncond, cond=cond, ptb=ptb, mod=mod, internal=internal)
 
 
 class Denoiser(Protocol):

@@ -37,13 +37,14 @@ from typing import Literal
 import torch
 from torch import Tensor
 
+from ltx_core.components.guiders import (
+    InternalCalibrationMode,
+    calibrate_internal_prediction,
+)
 from ltx_trainer.sra import CleanRGBSRAHead, extract_clean_rgb_sra_state_dict
 
-CalibrationMode = Literal["none", "token_norm", "sample_norm"]
+CalibrationMode = InternalCalibrationMode
 IGMode = Literal["parallel", "nested"]
-
-_EPS = 1e-6
-
 
 # ---------------------------------------------------------------------------
 # Guider
@@ -67,14 +68,11 @@ class IGGuider:
             ``sigma_low <= sigma <= sigma_high``. The IG paper reports that,
             unlike CFG, internal guidance should be applied in the *high and
             mid* noise range; ``sigma_low=0.3`` reproduces their best setting.
-        max_delta_norm: Optional safety clamp on the per-sample L2 norm of the
-            delta. 0 disables it.
     """
 
     scale: float = 1.0
     sigma_low: float = 0.0
     sigma_high: float = 1.0
-    max_delta_norm: float = 0.0
 
     def enabled(self) -> bool:
         return self.scale != 1.0
@@ -85,11 +83,6 @@ class IGGuider:
 
     def delta(self, strong: Tensor, weak: Tensor) -> Tensor:
         raw = (self.scale - 1.0) * (strong.float() - weak.float())
-        if self.max_delta_norm > 0:
-            batch = raw.shape[0]
-            norm = raw.reshape(batch, -1).norm(p=2, dim=1).clamp(min=_EPS)
-            factor = torch.minimum(torch.ones_like(norm), self.max_delta_norm / norm)
-            raw = raw * factor.reshape(batch, *([1] * (raw.ndim - 1)))
         return raw.to(strong.dtype)
 
 
@@ -113,21 +106,7 @@ def calibrate_weak_prediction(weak: Tensor, strong: Tensor, mode: CalibrationMod
         but it cannot recover the per-token magnitude structure that a cosine
         loss throws away.
     """
-    if mode == "none":
-        return weak
-    weak_f = weak.float()
-    strong_f = strong.float()
-    if mode == "token_norm":
-        weak_norm = weak_f.norm(dim=-1, keepdim=True).clamp(min=_EPS)
-        strong_norm = strong_f.norm(dim=-1, keepdim=True)
-        return (weak_f * (strong_norm / weak_norm)).to(weak.dtype)
-    if mode == "sample_norm":
-        batch = weak_f.shape[0]
-        weak_norm = weak_f.reshape(batch, -1).norm(dim=1).clamp(min=_EPS)
-        strong_norm = strong_f.reshape(batch, -1).norm(dim=1)
-        factor = (strong_norm / weak_norm).reshape(batch, *([1] * (weak_f.ndim - 1)))
-        return (weak_f * factor).to(weak.dtype)
-    raise ValueError(f"Unknown calibration mode: {mode}")
+    return calibrate_internal_prediction(weak, strong, mode)
 
 
 # ---------------------------------------------------------------------------

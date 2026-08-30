@@ -1,12 +1,14 @@
 """Flat denoiser classes — transformer received at call time, not stored.
 Three implementations of the :class:`~ltx_pipelines.utils.types.Denoiser` protocol:
 * :class:`SimpleDenoiser` — single transformer call, no guidance.
-* :class:`GuidedDenoiser` — static guiders, handles CFG + STG + isolated modality.
+* :class:`GuidedDenoiser` — static guiders, handles CFG + STG + modality + internal guidance.
 * :class:`FactoryGuidedDenoiser` — resolves guiders per-step from sigma.
 ``GuidedDenoiser`` and ``FactoryGuidedDenoiser`` share the core multi-pass
 logic via the module-level :func:`_guided_denoise` function, which batches
 all guidance passes into a single transformer call.
 """
+
+from collections.abc import Callable
 
 import torch
 
@@ -21,6 +23,8 @@ from ltx_core.model.transformer import X0Model
 from ltx_core.types import LatentState
 from ltx_pipelines.utils.helpers import modality_from_latent_state
 from ltx_pipelines.utils.types import DenoisedLatentResult
+
+InternalPredictionProvider = Callable[[torch.Tensor], torch.Tensor | None]
 
 _POSITIVE_ONLY_GUIDER = MultiModalGuider(
     params=MultiModalGuiderParams(cfg_scale=1.0, stg_scale=0.0, modality_scale=1.0),
@@ -68,6 +72,8 @@ def _guided_denoise(  # noqa: PLR0913,PLR0915
     last_denoised_audio: torch.Tensor | None,
     step_index: int,
     force_uncond_pass: bool = False,
+    video_internal_provider: InternalPredictionProvider | None = None,
+    audio_internal_provider: InternalPredictionProvider | None = None,
 ) -> tuple[DenoisedLatentResult | None, DenoisedLatentResult | None]:
     """Core guided denoising — batches all guidance passes into one transformer call.
     Collects per-pass contexts first, then builds a single batched Modality
@@ -195,14 +201,42 @@ def _guided_denoise(  # noqa: PLR0913,PLR0915
     ptb_v, ptb_a = r.get("ptb", (0.0, 0.0))
     mod_v, mod_a = r.get("mod", (0.0, 0.0))
 
-    denoised_video = last_denoised_video if v_skip else video_guider.calculate(cond_v, uncond_v, ptb_v, mod_v)
-    denoised_audio = last_denoised_audio if a_skip else audio_guider.calculate(cond_a, uncond_a, ptb_a, mod_a)
+    internal_v = (
+        video_internal_provider(cond_v)
+        if not v_skip and video_internal_provider is not None and video_guider.do_internal_guidance()
+        else None
+    )
+    internal_a = (
+        audio_internal_provider(cond_a)
+        if not a_skip and audio_internal_provider is not None and audio_guider.do_internal_guidance()
+        else None
+    )
+    denoised_video = (
+        last_denoised_video
+        if v_skip
+        else video_guider.calculate(cond_v, uncond_v, ptb_v, mod_v, internal=internal_v)
+    )
+    denoised_audio = (
+        last_denoised_audio
+        if a_skip
+        else audio_guider.calculate(cond_a, uncond_a, ptb_a, mod_a, internal=internal_a)
+    )
     return (
         DenoisedLatentResult.result_or_none(
-            denoised=denoised_video, uncond=uncond_v, cond=cond_v, ptb=ptb_v, mod=mod_v
+            denoised=denoised_video,
+            uncond=uncond_v,
+            cond=cond_v,
+            ptb=ptb_v,
+            mod=mod_v,
+            internal=internal_v,
         ),
         DenoisedLatentResult.result_or_none(
-            denoised=denoised_audio, uncond=uncond_a, cond=cond_a, ptb=ptb_a, mod=mod_a
+            denoised=denoised_audio,
+            uncond=uncond_a,
+            cond=cond_a,
+            ptb=ptb_a,
+            mod=mod_a,
+            internal=internal_a,
         ),
     )
 
@@ -239,7 +273,7 @@ class SimpleDenoiser:
 
 
 class GuidedDenoiser:
-    """Static guiders — handles CFG + STG + isolated modality.
+    """Static guiders — handles CFG + STG + modality + internal guidance.
     Context/guider can be ``None`` for absent modalities (a positive-only
     guider is substituted at call time).
     """
@@ -251,12 +285,16 @@ class GuidedDenoiser:
         video_guider: MultiModalGuider | None = None,
         audio_guider: MultiModalGuider | None = None,
         force_uncond_pass: bool = False,
+        video_internal_provider: InternalPredictionProvider | None = None,
+        audio_internal_provider: InternalPredictionProvider | None = None,
     ) -> None:
         self.v_context = v_context
         self.a_context = a_context
         self.video_guider = video_guider
         self.audio_guider = audio_guider
         self.force_uncond_pass = force_uncond_pass
+        self.video_internal_provider = video_internal_provider
+        self.audio_internal_provider = audio_internal_provider
         self._last_denoised_video: torch.Tensor | None = None
         self._last_denoised_audio: torch.Tensor | None = None
 
@@ -281,6 +319,8 @@ class GuidedDenoiser:
             last_denoised_audio=self._last_denoised_audio,
             step_index=step_index,
             force_uncond_pass=self.force_uncond_pass,
+            video_internal_provider=self.video_internal_provider,
+            audio_internal_provider=self.audio_internal_provider,
         )
         self._last_denoised_video = guided_denoise_result_v.denoised
         self._last_denoised_audio = guided_denoise_result_a.denoised
@@ -297,12 +337,16 @@ class FactoryGuidedDenoiser:
         video_guider_factory: MultiModalGuiderFactory | None = None,
         audio_guider_factory: MultiModalGuiderFactory | None = None,
         force_uncond_pass: bool = False,
+        video_internal_provider: InternalPredictionProvider | None = None,
+        audio_internal_provider: InternalPredictionProvider | None = None,
     ) -> None:
         self.v_context = v_context
         self.a_context = a_context
         self.video_guider_factory = video_guider_factory
         self.audio_guider_factory = audio_guider_factory
         self.force_uncond_pass = force_uncond_pass
+        self.video_internal_provider = video_internal_provider
+        self.audio_internal_provider = audio_internal_provider
         self._last_denoised_video: torch.Tensor | None = None
         self._last_denoised_audio: torch.Tensor | None = None
         self._sigma_vals_cached: list[float] | None = None
@@ -341,6 +385,8 @@ class FactoryGuidedDenoiser:
             last_denoised_audio=self._last_denoised_audio,
             step_index=step_index,
             force_uncond_pass=self.force_uncond_pass,
+            video_internal_provider=self.video_internal_provider,
+            audio_internal_provider=self.audio_internal_provider,
         )
         self._last_denoised_video = guided_denoise_result_v.denoised
         self._last_denoised_audio = guided_denoise_result_a.denoised

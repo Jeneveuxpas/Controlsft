@@ -1,10 +1,39 @@
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Literal
 
 import torch
 
 from ltx_core.components.protocols import GuiderProtocol
+
+InternalCalibrationMode = Literal["none", "token_norm", "sample_norm"]
+
+_EPS = 1e-6
+
+
+def calibrate_internal_prediction(
+    internal: torch.Tensor,
+    strong: torch.Tensor,
+    mode: InternalCalibrationMode,
+) -> torch.Tensor:
+    """Put an intermediate prediction on the strong prediction's scale."""
+    if mode == "none":
+        return internal
+
+    internal_f = internal.float()
+    strong_f = strong.float()
+    if mode == "token_norm":
+        internal_norm = internal_f.norm(dim=-1, keepdim=True).clamp(min=_EPS)
+        strong_norm = strong_f.norm(dim=-1, keepdim=True)
+        return (internal_f * (strong_norm / internal_norm)).to(internal.dtype)
+    if mode == "sample_norm":
+        batch = internal_f.shape[0]
+        internal_norm = internal_f.reshape(batch, -1).norm(dim=1).clamp(min=_EPS)
+        strong_norm = strong_f.reshape(batch, -1).norm(dim=1)
+        factor = (strong_norm / internal_norm).reshape(batch, *([1] * (internal_f.ndim - 1)))
+        return (internal_f * factor).to(internal.dtype)
+    raise ValueError(f"Unknown internal calibration mode: {mode}")
 
 
 @dataclass(frozen=True)
@@ -209,6 +238,8 @@ class MultiModalGuiderParams:
     "Modality scale controlling how strongly the model reacts to the perturbation of the modality."
     skip_step: int = 0
     "Skip step controlling how often the model skips the step."
+    internal_scale: float = 1.0
+    "Internal guidance extrapolation strength. 1.0 disables internal guidance."
 
 
 def _params_for_sigma_from_sorted_dict(
@@ -247,22 +278,35 @@ class MultiModalGuider:
         uncond_text: torch.Tensor | float,
         uncond_perturbed: torch.Tensor | float,
         uncond_modality: torch.Tensor | float,
+        internal: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
-        The guider calculates the guidance delta as (scale - 1) * (cond - uncond) for cfg and modality cfg,
-        and as scale * (cond - uncond) for stg, steering the denoising process away from the unconditioned
-        prediction.
+        Combine CFG, STG, modality and internal guidance, then apply one shared rescale.
+
+        ``internal`` must have the same shape as ``cond``. Callers that only
+        predict target tokens should fill the reference prefix with ``cond`` so
+        that the internal delta is zero there.
         """
         dtype = cond.dtype
         cond = cond.float()
         uncond_text = uncond_text.float() if isinstance(uncond_text, torch.Tensor) else uncond_text
         uncond_perturbed = uncond_perturbed.float() if isinstance(uncond_perturbed, torch.Tensor) else uncond_perturbed
         uncond_modality = uncond_modality.float() if isinstance(uncond_modality, torch.Tensor) else uncond_modality
+
+        internal_delta: torch.Tensor | float = 0.0
+        if internal is not None:
+            if internal.shape != cond.shape:
+                raise ValueError(
+                    f"Internal prediction shape {tuple(internal.shape)} must match cond {tuple(cond.shape)}"
+                )
+            internal_delta = (self.params.internal_scale - 1) * (cond - internal.float())
+
         pred = (
             cond
             + (self.params.cfg_scale - 1) * (cond - uncond_text)
             + self.params.stg_scale * (cond - uncond_perturbed)
             + (self.params.modality_scale - 1) * (cond - uncond_modality)
+            + internal_delta
         )
 
         if self.params.rescale_scale != 0:
@@ -283,6 +327,10 @@ class MultiModalGuider:
     def do_isolated_modality_generation(self) -> bool:
         """Returns True if the guider is doing isolated modality generation."""
         return not math.isclose(self.params.modality_scale, 1.0)
+
+    def do_internal_guidance(self) -> bool:
+        """Return whether an intermediate prediction should be requested."""
+        return not math.isclose(self.params.internal_scale, 1.0)
 
     def should_skip_step(self, step: int) -> bool:
         """Returns True if the guider should skip the step."""
