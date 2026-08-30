@@ -112,7 +112,7 @@ class OfficialStackMixin:
     ) -> tuple[LatentState | None, LatentState | None]:
         if video_frozen or audio_frozen:
             raise NotImplementedError(
-                "OfficialStackValidationRunner supports the video-only generation path; "
+                "OfficialStackMixin supports the video-only generation path; "
                 "frozen-modality flows should use the trainer stack."
             )
 
@@ -152,11 +152,14 @@ class OfficialStackMixin:
                 },
                 negative_context=v_ctx_neg,
             )
+        audio_guider_factory = MultiModalGuiderFactory.constant(
+            MultiModalGuiderParams(skip_step=self._skip_step)
+        )
         inner = FactoryGuidedDenoiser(
             v_context=v_ctx_pos,
             a_context=a_ctx_pos if audio_state is not None else None,
             video_guider_factory=video_guider_factory,
-            audio_guider_factory=None,  # video-only path; absent modality gets the positive-only guider
+            audio_guider_factory=audio_guider_factory,
         )
 
         ig_context: IGDenoiser | _NullContext = _NullContext()

@@ -857,6 +857,11 @@ def main() -> None:
     if args.ig_scale != 1.0 and (args.sra_head or args.checkpoint).suffix == ".safetensors" and args.ig_layer is None:
         raise ValueError("A .safetensors SRA head carries no metadata; pass --ig-layer explicitly")
     if args.stack == "official":
+        if args.ig_mode != "parallel":
+            console.print(
+                "[yellow]--ig-mode applies only to --stack trainer; "
+                "the official stack always combines Internal Guidance before rescale.[/yellow]"
+            )
         if args.guidance_scale != 1.0 and args.negative_te is None:
             raise ValueError("--guidance-scale > 1 on the official stack requires --negative-te")
         if args.negative_te is not None and not args.negative_te.is_file():

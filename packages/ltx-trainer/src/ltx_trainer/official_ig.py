@@ -19,7 +19,6 @@ along batch), the block hook fires once per step; the capture slices the first
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -153,11 +152,12 @@ class IGDenoiser:
         step_index: int,
     ) -> tuple[DenoisedLatentResult | None, DenoisedLatentResult | None]:
         factory = self._inner.video_guider_factory
-        params = factory.params(sigmas[step_index]) if factory is not None else None
+        guider = factory.build_from_sigma(sigmas[step_index]) if factory is not None else None
         step_needs_internal = (
             video_state is not None
-            and params is not None
-            and not math.isclose(params.internal_scale, 1.0)
+            and guider is not None
+            and guider.do_internal_guidance()
+            and not guider.should_skip_step(step_index)
         )
         if step_needs_internal:
             self._capture.arm(orig_b=video_state.latent.shape[0])
