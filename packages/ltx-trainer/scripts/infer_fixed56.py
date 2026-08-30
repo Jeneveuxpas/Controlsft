@@ -35,6 +35,8 @@ from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
 from ltx_core.model.video_vae import VAE_DECODER_COMFY_KEYS_FILTER, VideoDecoderConfigurator
 from ltx_core.text_encoders.gemma import convert_to_additive_mask
 from ltx_trainer.config import ReferenceConditionConfig, ValidationConfig, ValidationSample
+from ltx_trainer.ig_validation_runner import InternalGuidanceMixin
+from ltx_trainer.internal_guidance import IGGuider, default_calibration_for, load_sra_head
 from ltx_trainer.model_loader import load_embeddings_processor, load_transformer
 from ltx_trainer.progress import TrainingProgress
 from ltx_trainer.video_utils import save_video
@@ -207,6 +209,18 @@ class ControlValidationRunner(ValidationRunner):
         return video, audio
 
 
+class IGControlValidationRunner(InternalGuidanceMixin, ControlValidationRunner):
+    """ControlValidationRunner + Internal Guidance.
+
+    The mixin comes first so its ``_run_denoising`` wins; ``super()`` still
+    reaches ControlValidationRunner for the tuned VAE, the PrefixAware latent
+    tools and the with_control/target_only output handling.
+    """
+
+
+MANIFEST_SIZE = 56
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
@@ -261,6 +275,37 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--reference-downscale-factor", type=int, default=1)
     parser.add_argument("--reference-temporal-scale-factor", type=int, default=1)
+    subset = parser.add_argument_group("sample subset")
+    subset.add_argument(
+        "--indices",
+        type=int,
+        nargs="+",
+        help="validation_index values to render. Output names stay line-N, so a subset "
+        "is directly comparable against a previous full run.",
+    )
+    subset.add_argument("--limit", type=int, help="Shorthand for --indices 0..N-1.")
+
+    ig = parser.add_argument_group("internal guidance (IG)")
+    ig.add_argument("--ig-scale", type=float, default=1.0, help="Extrapolation strength gamma. 1.0 disables IG.")
+    ig.add_argument(
+        "--sra-head",
+        type=Path,
+        help="Clean RGB SRA head. Either the standalone clean_rgb_sra_head_step_XXXXX.pt export "
+        "(carries layer/depth metadata) or a full .safetensors checkpoint containing "
+        "clean_rgb_sra_head.* (then --ig-layer is required). Defaults to --checkpoint.",
+    )
+    ig.add_argument("--ig-layer", type=int, help="One-based block number. Defaults to the head's metadata.")
+    ig.add_argument(
+        "--ig-calibration",
+        choices=["auto", "none", "token_norm", "sample_norm"],
+        default="auto",
+        help="auto -> token_norm for cosine heads, none for smooth_l1 heads.",
+    )
+    ig.add_argument("--ig-mode", choices=["parallel", "nested"], default="parallel")
+    ig.add_argument("--ig-sigma-low", type=float, default=0.0)
+    ig.add_argument("--ig-sigma-high", type=float, default=1.0)
+    ig.add_argument("--ig-max-delta-norm", type=float, default=0.0)
+
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--worker-start", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--worker-count", type=int, help=argparse.SUPPRESS)
@@ -277,11 +322,34 @@ def _load_manifest(path: Path) -> list[dict]:
                 rows.append(json.loads(line))
             except json.JSONDecodeError as exc:
                 raise ValueError(f"Invalid JSON on manifest line {line_number}: {exc}") from exc
-    if len(rows) != 56:
-        raise ValueError(f"Fixed evaluation requires exactly 56 samples, got {len(rows)}")
-    if [row.get("validation_index") for row in rows] != list(range(56)):
-        raise ValueError("Manifest validation_index values must be exactly 0..55")
+    if len(rows) != MANIFEST_SIZE:
+        raise ValueError(f"Fixed evaluation requires exactly {MANIFEST_SIZE} samples, got {len(rows)}")
+    if [row.get("validation_index") for row in rows] != list(range(MANIFEST_SIZE)):
+        raise ValueError(f"Manifest validation_index values must be exactly 0..{MANIFEST_SIZE - 1}")
     return rows
+
+
+def _select_indices(args: argparse.Namespace) -> list[int]:
+    """Which validation_index values this run renders.
+
+    Subsetting never renumbers anything: items keep their manifest
+    validation_index and their ``line-N.mp4`` name, so a 12-sample run drops
+    straight into the same directory layout as a full 56-sample run.
+    """
+    if args.indices is not None and args.limit is not None:
+        raise ValueError("Pass either --indices or --limit, not both")
+    if args.indices is not None:
+        chosen = sorted(set(args.indices))
+    elif args.limit is not None:
+        if not 1 <= args.limit <= MANIFEST_SIZE:
+            raise ValueError(f"--limit must be in 1..{MANIFEST_SIZE}")
+        chosen = list(range(args.limit))
+    else:
+        return list(range(MANIFEST_SIZE))
+    out_of_range = [index for index in chosen if not 0 <= index < MANIFEST_SIZE]
+    if out_of_range:
+        raise ValueError(f"--indices out of range 0..{MANIFEST_SIZE - 1}: {out_of_range}")
+    return chosen
 
 
 def _resolve_path(value: str, manifest_path: Path) -> Path:
@@ -408,8 +476,10 @@ def _run_worker(args: argparse.Namespace, rows: list[dict]) -> None:
     save_comparison = not args.no_reference_control and not args.target_only
     if save_comparison:
         (output_dir / "with_control").mkdir(exist_ok=True)
+    chosen = set(_select_indices(args))
     all_items = _prepare_items(rows, args.manifest.resolve(), output_dir)
-    items = all_items[args.worker_start : args.worker_start + args.worker_count]
+    selected = [item for item in all_items if item.manifest_index in chosen]
+    items = selected[args.worker_start : args.worker_start + args.worker_count]
     if not args.overwrite:
         items = [
             item
@@ -468,7 +538,7 @@ def _run_worker(args: argparse.Namespace, rows: list[dict]) -> None:
         )
         for item in items
     ]
-    runner = ControlValidationRunner(
+    runner_kwargs = dict(
         config=config,
         model_path=args.base_checkpoint.resolve(),
         text_encoder_path=None,
@@ -487,6 +557,44 @@ def _run_worker(args: argparse.Namespace, rows: list[dict]) -> None:
         ),
     )
     transformer = _load_transformer(args.base_checkpoint.resolve(), args.checkpoint.resolve(), device)
+
+    if args.ig_scale != 1.0:
+        head_path = (args.sra_head or args.checkpoint).resolve()
+        sra_head, sra_metadata = load_sra_head(
+            head_path,
+            transformer,
+            device=device,
+            dtype=torch.bfloat16,
+            hidden_layer=args.ig_layer,
+        )
+        loss_type = str(sra_metadata.get("clean_rgb_sra_loss_type", "unknown"))
+        calibration = default_calibration_for(loss_type) if args.ig_calibration == "auto" else args.ig_calibration
+        if args.ig_calibration == "auto" and loss_type == "unknown":
+            console.print(
+                "[yellow]SRA head has no loss_type metadata; calibration defaults to 'none'. "
+                "Pass --ig-calibration token_norm for a cosine-trained head.[/yellow]"
+            )
+        hidden_layer = int(args.ig_layer or sra_metadata["clean_rgb_sra_hidden_layer"])
+        console.print(
+            f"IG: layer={hidden_layer} gamma={args.ig_scale} mode={args.ig_mode} "
+            f"calibration={calibration} (head loss={loss_type}) "
+            f"interval=[{args.ig_sigma_low}, {args.ig_sigma_high}]"
+        )
+        runner = IGControlValidationRunner(
+            **runner_kwargs,
+            sra_head=sra_head,
+            ig_guider=IGGuider(
+                scale=args.ig_scale,
+                sigma_low=args.ig_sigma_low,
+                sigma_high=args.ig_sigma_high,
+                max_delta_norm=args.ig_max_delta_norm,
+            ),
+            ig_hidden_layer=hidden_layer,
+            ig_calibration=calibration,
+            ig_mode=args.ig_mode,
+        )
+    else:
+        runner = ControlValidationRunner(**runner_kwargs)
 
     with tempfile.TemporaryDirectory(prefix=".fixed56_outputs_", dir=output_dir) as temp_dir:
         with TrainingProgress(enabled=False, total_steps=1) as progress:
@@ -561,17 +669,32 @@ def _worker_command(args: argparse.Namespace, worker: Worker) -> list[str]:
         command.append("--target-only")
     command.extend(["--reference-downscale-factor", str(args.reference_downscale_factor)])
     command.extend(["--reference-temporal-scale-factor", str(args.reference_temporal_scale_factor)])
+    chosen = _select_indices(args)
+    if len(chosen) != MANIFEST_SIZE:
+        command.extend(["--indices", *(str(index) for index in chosen)])
+    if args.ig_scale != 1.0:
+        command.extend(["--ig-scale", str(args.ig_scale)])
+        command.extend(["--ig-mode", args.ig_mode])
+        command.extend(["--ig-calibration", args.ig_calibration])
+        command.extend(["--ig-sigma-low", str(args.ig_sigma_low)])
+        command.extend(["--ig-sigma-high", str(args.ig_sigma_high)])
+        command.extend(["--ig-max-delta-norm", str(args.ig_max_delta_norm)])
+        if args.sra_head is not None:
+            command.extend(["--sra-head", str(args.sra_head.resolve())])
+        if args.ig_layer is not None:
+            command.extend(["--ig-layer", str(args.ig_layer)])
     return command
 
 
 def _run_coordinator(args: argparse.Namespace, rows: list[dict]) -> None:
-    workers = _partition(len(rows), args.gpus)
+    chosen = _select_indices(args)
+    workers = _partition(len(chosen), args.gpus)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     log_dir = args.output_dir / "logs"
     log_dir.mkdir(exist_ok=True)
     for worker in workers:
-        end = worker.start_index + worker.num_samples - 1
-        print(f"GPU {worker.gpu}: samples {worker.start_index}..{end}")
+        span = chosen[worker.start_index : worker.start_index + worker.num_samples]
+        print(f"GPU {worker.gpu}: validation_index {span[0]}..{span[-1]} ({len(span)} samples)")
         if args.dry_run:
             print("  " + " ".join(_worker_command(args, worker)))
     if args.dry_run:
@@ -611,14 +734,14 @@ def _run_coordinator(args: argparse.Namespace, rows: list[dict]) -> None:
     missing = [
         output_dir / f"line-{index}.mp4"
         for output_dir in expected_dirs
-        for index in range(56)
+        for index in chosen
         if not (output_dir / f"line-{index}.mp4").is_file()
     ]
     if missing:
         raise RuntimeError(f"Evaluation finished but {len(missing)} outputs are missing: {missing[:3]}")
     elapsed = (time.monotonic() - started_at) / 60
     mode = "text-only" if args.no_reference_control else "control-conditioned"
-    output_count = 56 * len(expected_dirs)
+    output_count = len(chosen) * len(expected_dirs)
     print(f"Evaluation complete: {output_count}/{output_count} {mode} output files ({elapsed:.1f} min)")
 
 
@@ -654,6 +777,13 @@ def main() -> None:
         raise ValueError("Reference scale factors must be >= 1")
     if args.no_reference_control and args.target_only:
         raise ValueError("--target-only is redundant with --no-reference-control")
+    if args.sra_head is not None and not args.sra_head.is_file():
+        raise FileNotFoundError(args.sra_head)
+    if not 0.0 <= args.ig_sigma_low <= args.ig_sigma_high <= 1.0:
+        raise ValueError("--ig-sigma-low/--ig-sigma-high must satisfy 0 <= low <= high <= 1")
+    if args.ig_scale != 1.0 and (args.sra_head or args.checkpoint).suffix == ".safetensors" and args.ig_layer is None:
+        raise ValueError("A .safetensors SRA head carries no metadata; pass --ig-layer explicitly")
+    _select_indices(args)
     rows = _load_manifest(args.manifest)
     if args.worker_start is not None or args.worker_count is not None:
         if args.worker_start is None or args.worker_count is None:
